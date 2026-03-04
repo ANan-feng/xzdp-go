@@ -28,6 +28,9 @@ REM 5. Install bcrypt for password encryption
 echo Installing bcrypt for password encryption...
 go get golang.org/x/crypto/bcrypt@v0.21.0
 
+REM 6. Install Redis
+echo Installing dotenv for environment config...
+go get github.com/go-redis/redis/v8
 
 REM 7. Install dotenv for config management
 echo Installing dotenv for environment config...

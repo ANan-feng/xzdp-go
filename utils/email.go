@@ -8,9 +8,10 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"xzdp-go/model"
 )
+
+// 验证码Redis前缀（黑马点评规范：业务:模块:功能:唯一标识）
+const emailCodePrefix = "xzdp:email:code:"
 
 // SendEmailCode 发送邮箱验证码
 func SendEmailCode(email, code string) error {
@@ -117,31 +118,34 @@ func SendEmailCode(email, code string) error {
 	}
 	client.Quit()
 
-	// 7. 保存验证码到数据库
-	expireTime := time.Now().Add(5 * time.Minute)
-	dbResult := DB.Exec(
-		"INSERT INTO email_code (email, code, expire_time) VALUES (?, ?, ?)",
-		email, code, expireTime,
-	)
-	if dbResult.Error != nil {
-		return fmt.Errorf("save email code to db failed: %v", dbResult.Error)
+	// 7. 存入Redis（替换原MySQL写入）
+	redisKey := emailCodePrefix + email
+	// 设置验证码 + 5分钟过期（Redis自动删除，无需手动处理）
+	err = RedisClient.Set(ctx, redisKey, code, 5*time.Minute).Err()
+	if err != nil {
+		return fmt.Errorf("save email code to redis failed: %v", err)
 	}
 
 	return nil
 }
 
-// 其他函数（GenerateEmailCode/VerifyEmailCode）保持不变
 // GenerateEmailCode 生成6位随机验证码
 func GenerateEmailCode() string {
 	randNum := time.Now().UnixNano() % 1000000
 	return fmt.Sprintf("%06d", randNum)
 }
 
-// VerifyEmailCode 验证邮箱验证码是否有效
+// VerifyEmailCode 验证邮箱验证码（从Redis读取）
 func VerifyEmailCode(email, code string) bool {
-	var emailCode model.EmailCode
-	// 查询未过期的验证码
-	result := DB.Where("email = ? AND code = ? AND expire_time > ?", email, code, time.Now()).First(&emailCode)
-	// 正确判断：Error为nil表示查询成功（验证码有效）
-	return result.Error == nil
+	redisKey := emailCodePrefix + email
+	// 从Redis获取验证码
+	storedCode, err := RedisClient.Get(ctx, redisKey).Result()
+	// 异常/验证码不存在/不匹配，都返回false
+	if err != nil || storedCode != code {
+		return false
+	}
+
+	// 验证成功后删除验证码（防止重复使用）
+	RedisClient.Del(ctx, redisKey)
+	return true
 }

@@ -10,6 +10,8 @@ import (
 func main() {
 	// 1. 初始化数据库
 	utils.InitDB()
+	// 初始化Redis
+	utils.InitRedis()
 
 	// 2. 创建Gin引擎
 	r := gin.Default()
