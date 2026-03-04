@@ -15,6 +15,15 @@ const emailCodePrefix = "xzdp:email:code:"
 
 // SendEmailCode 发送邮箱验证码
 func SendEmailCode(email, code string) error {
+	// 验证码还未过期，提示用户请勿频繁点击获取
+	redisKey := emailCodePrefix + email
+	// 检查Redis中是否存在未过期的验证码
+	storedCode, err := RedisClient.Get(ctx, redisKey).Result()
+	// 无错误且能获取到验证码 → 说明未过期，返回提示
+	if err == nil && storedCode != "" {
+		return fmt.Errorf("验证码未过期，请勿频繁获取（有效期5分钟）")
+	}
+
 	// 1. 读取邮箱配置
 	smtpHost := os.Getenv("EMAIL_SMTP_HOST")
 	smtpPortStr := os.Getenv("EMAIL_SMTP_PORT")
@@ -119,7 +128,6 @@ func SendEmailCode(email, code string) error {
 	client.Quit()
 
 	// 7. 存入Redis（替换原MySQL写入）
-	redisKey := emailCodePrefix + email
 	// 设置验证码 + 5分钟过期（Redis自动删除，无需手动处理）
 	err = RedisClient.Set(ctx, redisKey, code, 5*time.Minute).Err()
 	if err != nil {
