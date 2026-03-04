@@ -2,6 +2,7 @@ package dao
 
 import (
 	"errors"
+	"time"
 	"xzdp-go/model"
 	"xzdp-go/utils"
 )
@@ -25,18 +26,15 @@ func (d *UserDao) CreateUser(email string) (*model.User, error) {
 	if email == "" {
 		return nil, errors.New("邮箱不能为空")
 	}
-	emailBytes := []byte(email)
-	var suffix []byte
-	if len(emailBytes) >= 4 {
-		suffix = emailBytes[len(emailBytes)-4:]
-	} else {
-		suffix = emailBytes
-	}
 
-	nickname := "xzdp用户_" + string(suffix)
+	nickname := "momo"
+	now := time.Now()
 	user := &model.User{
-		Email:    email,
-		Nickname: nickname, // 昵称：黑马用户+手机号后4位
+		Email:      email,
+		Nickname:   nickname,                                         // 昵称：黑马用户+手机号后4位
+		Avatar:     "https://img-blog.csdnimg.cn/20240101000000.png", // 默认头像
+		CreateTime: now,                                              // 显式赋值
+		UpdateTime: now,                                              // 显式赋值
 	}
 	result := utils.DB.Create(user)
 	if result.Error != nil {
