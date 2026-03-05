@@ -45,7 +45,7 @@ func (s *UserService) EmailLogin(email, code string) (string, int64, error) {
 	}
 
 	// 4. 生成JWT token
-	token, err := utils.GenerateToken(user.Id, user.Email)
+	token := utils.GenerateCustomToken()
 	if err != nil {
 		return "", 0, err
 	}
