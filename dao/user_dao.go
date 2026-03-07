@@ -10,7 +10,7 @@ import (
 // UserDao 用户数据访问层（封装数据库操作，实习：分层解耦）
 type UserDao struct{}
 
-// GetUserByEmail 根据手机号查询用户
+// GetUserByEmail 根据邮箱查询用户
 func (d *UserDao) GetUserByEmail(email string) (*model.User, error) {
 	var user model.User
 	result := utils.DB.Where("email = ?", email).First(&user)
@@ -31,7 +31,7 @@ func (d *UserDao) CreateUser(email string) (*model.User, error) {
 	now := time.Now()
 	user := &model.User{
 		Email:      email,
-		Nickname:   nickname,                                         // 昵称：黑马用户+手机号后4位
+		Nickname:   nickname,                                         // 昵称：初始统一为"momo"，后续可修改
 		Avatar:     "https://img-blog.csdnimg.cn/20240101000000.png", // 默认头像
 		CreateTime: now,                                              // 显式赋值
 		UpdateTime: now,                                              // 显式赋值
