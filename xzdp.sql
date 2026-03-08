@@ -34,3 +34,55 @@ CREATE TABLE `email_code` (
 
 -- 可选：插入测试数据
 INSERT INTO `user` (`email`, `nickname`) VALUES ('test@qq.com', '测试用户');
+
+-- ----------------------------
+-- Table structure for shop (商户表)
+-- ----------------------------
+DROP TABLE IF EXISTS `shop`;
+CREATE TABLE `shop` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '商户ID',
+  `name` varchar(100) NOT NULL COMMENT '商户名称',
+  `type_id` bigint NOT NULL COMMENT '商户类型ID',
+  `images` varchar(1000) DEFAULT NULL COMMENT '商户图片，多个图片用,分隔',
+  `area` varchar(20) DEFAULT NULL COMMENT '商户所在区域',
+  `address` varchar(255) NOT NULL COMMENT '商户详细地址',
+  `x` decimal(10,6) DEFAULT NULL COMMENT '经度',
+  `y` decimal(10,6) DEFAULT NULL COMMENT '纬度',
+  `avg_score` decimal(2,1) DEFAULT '5.0' COMMENT '评分',
+  `sold` int DEFAULT '0' COMMENT '销量',
+  `comments` int DEFAULT '0' COMMENT '评论数',
+  `price_range` varchar(20) DEFAULT NULL COMMENT '价格区间',
+  `open_hours` varchar(50) DEFAULT NULL COMMENT '营业时间',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  INDEX `idx_type_id` (`type_id`) COMMENT '商户类型索引',
+  INDEX `idx_location` (`x`,`y`) COMMENT '地理位置索引'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商户表';
+
+-- 插入测试数据
+INSERT INTO `shop` (`name`, `type_id`, `address`, `avg_score`) 
+VALUES ('测试商户1', 1, '北京市朝阳区测试路1号', 4.8),
+       ('测试商户2', 2, '上海市浦东新区测试路2号', 4.5);
+
+
+-- ----------------------------
+-- Table structure for shop_type (商户类型表)
+-- ----------------------------
+DROP TABLE IF EXISTS `shop_type`;
+CREATE TABLE `shop_type` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '类型ID',
+  `name` varchar(50) NOT NULL COMMENT '类型名称（如美食、酒店、休闲）',
+  `icon` varchar(255) DEFAULT NULL COMMENT '类型图标URL',
+  `sort` int DEFAULT 0 COMMENT '排序权重（越大越靠前）',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_name` (`name`) COMMENT '类型名称唯一'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商户类型表';
+
+-- 插入测试数据
+INSERT INTO `shop_type` (`name`, `icon`, `sort`) 
+VALUES ('美食', 'https://img.example.com/food.png', 10),
+       ('酒店', 'https://img.example.com/hotel.png', 9),
+       ('休闲娱乐', 'https://img.example.com/entertain.png', 8);

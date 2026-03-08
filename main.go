@@ -34,6 +34,32 @@ func main() {
 		authGroup.GET("/info", userController.GetUserInfoHandler) // 获取用户信息
 		authGroup.POST("/logout", userController.LogoutHandler)   // 登出
 	}
+
+	// 初始化商户控制器
+	shopController := controller.NewShopController()
+
+	// 商户路由（无需登录）
+	shopGroup := r.Group("/shop")
+	{
+		shopGroup.GET("/:id", shopController.GetShopByIdHandler)        // 通用商户查询
+		shopGroup.GET("/hot/:id", shopController.GetHotShopByIdHandler) // 热点商户查询
+		shopGroup.GET("/type", shopController.ListShopByTypeHandler)    // 按类型分页查询
+		shopGroup.POST("", shopController.UpdateShopHandler)            // 更新商户
+	}
+
+	// 初始化商户类型控制器
+	shopTypeController := controller.NewShopTypeController()
+
+	// 商户类型路由（无需登录）
+	shopTypeGroup := r.Group("/shop-type")
+	{
+		shopTypeGroup.GET("/:id", shopTypeController.GetShopTypeByIdHandler)   // 根据ID查询
+		shopTypeGroup.GET("", shopTypeController.ListAllShopTypesHandler)      // 查询所有
+		shopTypeGroup.POST("", shopTypeController.CreateShopTypeHandler)       // 新增
+		shopTypeGroup.PUT("", shopTypeController.UpdateShopTypeHandler)        // 更新
+		shopTypeGroup.DELETE("/:id", shopTypeController.DeleteShopTypeHandler) // 删除
+	}
+
 	// 4. 启动服务
 	r.Run(":8080") // 监听8080端口
 }
