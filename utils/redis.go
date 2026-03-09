@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -33,4 +34,25 @@ func InitRedis() {
 	if err != nil {
 		panic("Redis connect failed: " + err.Error())
 	}
+}
+
+// InitSeckillCouponCache 初始化秒杀优惠券库存缓存
+func InitSeckillCouponCache(ctx context.Context) error {
+	// 这里可以从数据库/配置文件读取优惠券配置，而非硬编码
+	couponConfigs := []struct {
+		couponId int64
+		stock    int64
+		expire   time.Duration
+	}{
+		{1, 100, 1 * time.Hour},
+		{2, 50, 1 * time.Hour},
+		// 更多优惠券配置...
+	}
+
+	for _, cfg := range couponConfigs {
+		if err := SetCouponStock(ctx, cfg.couponId, cfg.stock, time.Now().Add(cfg.expire)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

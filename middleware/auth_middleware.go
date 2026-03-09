@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -18,6 +19,7 @@ func LoginInterceptor() gin.HandlerFunc {
 		if strings.HasPrefix(token, "Bearer ") {
 			token = strings.TrimPrefix(token, "Bearer ")
 		}
+		fmt.Printf("处理后的Token：%s\n", token) // 加日志
 		if token == "" {
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"code": 401,

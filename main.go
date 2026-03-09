@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"xzdp-go/controller"
 	"xzdp-go/middleware"
 	"xzdp-go/utils"
@@ -16,6 +17,17 @@ func main() {
 
 	// 2. 创建Gin引擎
 	r := gin.Default()
+
+	//初始化Lua脚本缓存
+	if err := utils.InitScriptCache(); err != nil {
+		panic("init lua script cache failed: " + err.Error())
+	}
+
+	// 2. 业务缓存初始化（统一入口）
+	ctx := context.Background()
+	if err := utils.InitSeckillCouponCache(ctx); err != nil {
+		panic("init seckill coupon cache failed: " + err.Error())
+	}
 
 	// 3. 初始化控制器
 	userController := controller.NewUserController()
@@ -58,6 +70,16 @@ func main() {
 		shopTypeGroup.POST("", shopTypeController.CreateShopTypeHandler)       // 新增
 		shopTypeGroup.PUT("", shopTypeController.UpdateShopTypeHandler)        // 更新
 		shopTypeGroup.DELETE("/:id", shopTypeController.DeleteShopTypeHandler) // 删除
+	}
+
+	// 初始化秒杀控制器
+	seckillController := controller.NewSeckillController()
+
+	// 秒杀路由（需要登录）
+	seckillGroup := r.Group("/seckill")
+	seckillGroup.Use(middleware.LoginInterceptor())
+	{
+		seckillGroup.POST("/:couponId", seckillController.SeckillOrderHandler) // 秒杀下单
 	}
 
 	// 4. 启动服务
