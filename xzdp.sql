@@ -88,46 +88,50 @@ VALUES ('美食', 'https://img.example.com/food.png', 10),
        ('休闲娱乐', 'https://img.example.com/entertain.png', 8);
 
 
--- ----------------------------
--- Table structure for coupon (优惠券表)
--- ----------------------------
-DROP TABLE IF EXISTS `coupon`;
-CREATE TABLE `coupon` (
-  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '优惠券ID',
-  `title` varchar(100) NOT NULL COMMENT '优惠券标题',
-  `price` decimal(10,2) NOT NULL COMMENT '优惠券面值',
-  `stock` int NOT NULL COMMENT '库存',
-  `start_time` datetime NOT NULL COMMENT '开始时间',
-  `end_time` datetime NOT NULL COMMENT '结束时间',
-  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+
+-- 优惠券主表（对应黑马点评tb_voucher）
+DROP TABLE IF EXISTS `voucher`;
+CREATE TABLE `voucher` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `shop_id` bigint NOT NULL COMMENT '商铺id',
+  `title` varchar(255) NOT NULL COMMENT '代金券标题',
+  `sub_title` varchar(255) DEFAULT NULL COMMENT '副标题',
+  `rules` varchar(1024) DEFAULT NULL COMMENT '使用规则',
+  `pay_value` bigint NOT NULL COMMENT '支付金额（分）',
+  `actual_value` bigint NOT NULL COMMENT '抵扣金额（分）',
+  `type` tinyint NOT NULL DEFAULT '0' COMMENT '0-普通券；1-秒杀券',
+  `status` tinyint NOT NULL DEFAULT '1' COMMENT '1-上架；2-下架；3-过期',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
-  INDEX `idx_time` (`start_time`,`end_time`) COMMENT '时间范围索引'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='优惠券表';
+  INDEX `idx_shop_id` (`shop_id`) COMMENT '商铺ID索引'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='优惠券主表';
+-- ----------------------------
+-- 秒杀优惠券表（一对一关联优惠券主表，对应黑马点评tb_seckill_voucher）
+DROP TABLE IF EXISTS `seckill_voucher`;
+CREATE TABLE `seckill_voucher` (
+  `voucher_id` bigint NOT NULL COMMENT '关联优惠券ID',
+  `stock` int NOT NULL COMMENT '库存',
+  `begin_time` timestamp NOT NULL COMMENT '生效时间',
+  `end_time` timestamp NOT NULL COMMENT '失效时间',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`voucher_id`) COMMENT '与优惠券一对一',
+  INDEX `idx_time` (`begin_time`,`end_time`) COMMENT '时间范围索引'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='秒杀优惠券表';
 
 
--- ----------------------------
--- Table structure for seckill_order (秒杀订单表)
--- ----------------------------
+-- 秒杀订单表（保留原逻辑，补充商铺ID可选）
 DROP TABLE IF EXISTS `seckill_order`;
 CREATE TABLE `seckill_order` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '订单ID',
   `user_id` bigint NOT NULL COMMENT '用户ID',
-  `coupon_id` bigint NOT NULL COMMENT '优惠券ID',
-  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `voucher_id` bigint NOT NULL COMMENT '优惠券ID',
+  `shop_id` bigint NOT NULL COMMENT '商铺ID',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_user_coupon` (`user_id`,`coupon_id`) COMMENT '一人一单唯一约束',
+  UNIQUE KEY `uk_user_voucher` (`user_id`,`voucher_id`) COMMENT '一人一单',
   INDEX `idx_user_id` (`user_id`) COMMENT '用户ID索引'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='秒杀订单表';
-
--- 1. 优惠券表测试数据（库存100，有效期1小时）
-INSERT INTO `coupon` (`title`, `price`, `stock`, `start_time`, `end_time`)
-VALUES 
-('测试秒杀优惠券-10元', 10.00, 100, NOW(), DATE_ADD(NOW(), INTERVAL 1 HOUR)),
-('测试秒杀优惠券-20元', 20.00, 50, NOW(), DATE_ADD(NOW(), INTERVAL 1 HOUR));
-
--- 2. 秒杀订单表初始无数据（下单后自动生成）
--- 可选：手动插入一条测试订单（模拟已下单用户）
-INSERT INTO `seckill_order` (`user_id`, `coupon_id`)
-VALUES (1001, 1); -- 假设用户1001已下单优惠券ID=1，测试一人一单
