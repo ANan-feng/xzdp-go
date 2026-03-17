@@ -14,12 +14,71 @@ import (
 	"gorm.io/gorm"
 )
 
+// 分布式锁相关常量（可抽离到配置文件）
+const (
+	// 分布式锁key前缀
+	seckillLockPrefix = "seckill:lock:"
+	// 锁超时时间（防止死锁）
+	lockTimeout = 5 * time.Second
+	// 锁重试间隔
+	lockRetryInterval = 100 * time.Millisecond
+	// 最大重试次数
+	maxLockRetry = 3
+)
+
 // SeckillController 秒杀控制器
 type SeckillController struct{}
 
 // NewSeckillController 创建秒杀控制器实例
 func NewSeckillController() *SeckillController {
 	return &SeckillController{}
+}
+
+// ========== 新增：分布式锁工具函数 ==========
+// getSeckillLockKey 生成分布式锁key（用户+优惠券维度）
+func getSeckillLockKey(userId, couponId int64) string {
+	return fmt.Sprintf("%s%d_%d", seckillLockPrefix, userId, couponId)
+}
+
+// acquireDistLock 获取分布式锁
+func acquireDistLock(ctx context.Context, userId, couponId int64, c *gin.Context) (bool, string) {
+	lockKey := getSeckillLockKey(userId, couponId)
+	// 生成唯一锁标识（防止误解锁）
+	lockValue := utils.GenerateUUID()
+
+	// 重试获取锁
+	for i := 0; i < maxLockRetry; i++ {
+		// Redis SET NX EX 命令：原子性获取锁+设置超时
+		success, err := utils.RedisSetNXWithExpire(ctx, lockKey, lockValue, lockTimeout)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "获取分布式锁失败：" + err.Error()})
+			return false, ""
+		}
+		if success {
+			return true, lockValue
+		}
+		// 重试间隔
+		time.Sleep(lockRetryInterval)
+	}
+
+	// 多次重试失败
+	c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": "抢购人数过多，请稍后再试"})
+	return false, ""
+}
+
+// releaseDistLock 释放分布式锁（Lua脚本保证原子性）
+func releaseDistLock(ctx context.Context, userId, couponId int64, lockValue string) error {
+	lockKey := getSeckillLockKey(userId, couponId)
+	// Lua脚本：校验锁标识一致才删除（防止误删其他请求的锁）
+	luaScript := `
+		if redis.call('get', KEYS[1]) == ARGV[1] then
+			return redis.call('del', KEYS[1])
+		else
+			return 0
+		end
+	`
+	_, err := utils.RedisEval(ctx, luaScript, []string{lockKey}, []string{lockValue})
+	return err
 }
 
 // ========== 拆分工具函数：降低主函数复杂度 ==========
@@ -69,6 +128,7 @@ func checkPreResult(result int, c *gin.Context) bool {
 }
 
 // createSeckillOrder 数据库创建秒杀订单（事务）
+// 改造createSeckillOrder：移除事务外的锁逻辑，专注数据库操作
 func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Context) (int64, bool) {
 	// 1. 扣减库存（乐观锁）
 	voucher := &model.SeckillVoucher{VoucherID: couponId}
@@ -113,67 +173,102 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 	return order.ID, true
 }
 
-// ========== 核心接口：秒杀下单 ==========
-// SeckillOrderHandler 秒杀下单接口
+// SeckillOrderHandler 秒杀下单接口（优化版）
 // @Summary 秒杀下单
 // @Param couponId path int64 true "优惠券ID"
 // @Param token header string true "用户Token"
 // @Success 200 {object} gin.H{"code":200,"msg":"success","data":{"order_id":int64}}
 // @Failure 400 {object} gin.H{"code":400,"msg":"失败原因"}
+// @Failure 429 {object} gin.H{"code":429,"msg":"抢购人数过多，请稍后再试"}
 // @Router /seckill/{couponId} [post]
 func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
-	// 1. 获取用户ID（登录中间件已校验）
+	// ============= 1. 基础参数校验 =============
+	// 1.1 获取并校验用户ID（登录中间件已校验，二次兜底）
 	userId, exists := c.Get("userId")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "未获取到用户信息"})
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "未获取到用户信息，请先登录"})
 		return
 	}
 	userIdInt64, ok := userId.(int64)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "用户ID格式错误"})
+	if !ok || userIdInt64 <= 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "用户ID格式错误或无效"})
 		return
 	}
 
-	// 2. 解析优惠券ID
+	// 1.2 解析并校验优惠券ID
 	couponId, ok := parseCouponId(c)
-	if !ok {
-		return
+	if !ok || couponId <= 0 {
+		return // parseCouponId已返回错误响应
 	}
 
-	// 3. 查询秒杀优惠券信息
-	ctx := context.Background()
+	// ============= 2. 上下文与基础变量初始化 =============
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel() // 防止上下文泄漏
+
+	// ============= 3. Redis 全量预检（核心：提前拦截无效请求） =============
+	// 3.1 先查询优惠券基础信息（兜底校验，防止Redis数据不一致）
 	voucher, ok := getSeckillVoucher(ctx, couponId, c)
 	if !ok {
-		return
+		return // getSeckillVoucher已返回错误响应
 	}
 
-	// 4. Redis预检（Lua脚本）
+	// 3.2 Redis 原子预检（Lua脚本：过期/库存/一人一单 全量校验）
+	// 预检逻辑：
+	// - 1. 校验优惠券是否未过期
+	// - 2. 校验库存是否充足
+	// - 3. 校验用户是否已下单（一人一单）
+	// - 4. 以上都通过则扣减Redis库存 + 标记用户已下单（原子操作）
 	result, err := utils.SeckillPreCheck(ctx, couponId, userIdInt64, voucher.EndTime)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "预检失败：" + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统预检失败，请稍后再试：" + err.Error()})
 		return
 	}
 
-	// 5. 预检结果判断
+	// 3.3 预检结果判断（提前返回，减少后续资源消耗）
 	if !checkPreResult(result, c) {
-		return
+		return // checkPreResult已返回错误响应
 	}
 
-	// 6. 数据库事务创建订单
-	tx := utils.DB.Begin()
+	// ============= 4. 分布式锁（核心：防止超卖/重复下单） =============
+	// 4.1 获取分布式锁（用户+优惠券维度，防止同一用户重复请求）
+	lockSuccess, lockValue := acquireDistLock(ctx, userIdInt64, couponId, c)
+	if !lockSuccess {
+		return // acquireDistLock已返回429/500错误响应
+	}
+
+	// 4.2 确保锁最终释放（defer+原子解锁，防止死锁）
 	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
+		if err := releaseDistLock(ctx, userIdInt64, couponId, lockValue); err != nil {
+			// 仅日志告警，不影响主流程（锁有超时兜底）
+			fmt.Printf("[秒杀下单] 释放分布式锁失败，用户ID：%d，优惠券ID：%d，错误：%v\n", userIdInt64, couponId, err)
 		}
 	}()
 
-	// 7. 创建订单并返回结果
-	orderId, ok := createSeckillOrder(tx, userIdInt64, couponId, c)
-	if !ok {
+	// ============= 5. 数据库最终校验与订单创建（事务） =============
+	// 5.1 开启数据库事务（带超时）
+	tx := utils.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "开启事务失败：" + tx.Error.Error()})
 		return
 	}
 
-	// 8. 返回成功响应
+	// 5.2 事务兜底：panic/错误时回滚
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			fmt.Printf("[秒杀下单] 程序panic，用户ID：%d，优惠券ID：%d，错误：%v\n", userIdInt64, couponId, r)
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统异常，请稍后再试"})
+		}
+	}()
+
+	// 5.3 执行订单创建（乐观锁扣库存 + 一人一单校验）
+	orderId, ok := createSeckillOrder(tx, userIdInt64, couponId, c)
+	if !ok {
+		// createSeckillOrder内部已处理回滚和错误响应
+		return
+	}
+
+	// ============= 6. 成功响应 =============
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "秒杀下单成功",

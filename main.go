@@ -2,14 +2,29 @@ package main
 
 import (
 	"context"
+	"os" // 新增：读取环境变量
+	"runtime"
+	"strconv" // 新增：类型转换
 	"xzdp-go/controller"
 	"xzdp-go/middleware"
 	"xzdp-go/utils"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv" // 需先安装：go get github.com/joho/godotenv
 )
 
 func main() {
+
+	// 新增：开启Gin多核模式
+	gin.SetMode(gin.ReleaseMode)         // 生产环境建议开启release模式
+	runtime.GOMAXPROCS(runtime.NumCPU()) // 利用所有CPU核心
+
+	// 新增：加载.env文件
+	err := godotenv.Load()
+	if err != nil {
+		panic("load .env file failed: " + err.Error())
+	}
+
 	// 1. 初始化组件
 	utils.InitDB()
 	utils.InitRedis()
@@ -83,8 +98,14 @@ func main() {
 		seckillGroup.POST("/:couponId", seckillController.SeckillOrderHandler) // 秒杀下单
 	}
 
-	// 4. 启动服务
-	if err := r.Run(":8080"); err != nil {
+	// 4. 启动服务（读取.env中的端口）
+	portStr := os.Getenv("SERVER_PORT")
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		panic("invalid SERVER_PORT in .env: " + err.Error())
+	}
+	addr := ":" + strconv.Itoa(port)
+	if err := r.Run(addr); err != nil {
 		panic("server start failed: " + err.Error())
 	}
 }

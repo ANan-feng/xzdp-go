@@ -2,11 +2,14 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
+	"xzdp-go/model"
 
 	"github.com/go-redis/redis/v8"
+	"gorm.io/gorm"
 )
 
 var (
@@ -36,23 +39,65 @@ func InitRedis() {
 	}
 }
 
-// InitSeckillCouponCache 初始化秒杀优惠券库存缓存
+// 补充缺失的 GetRedisClient 函数
+func GetRedisClient() *redis.Client {
+	return RedisClient
+}
+
+// 补充缺失的 GetDB 函数（需和项目中数据库实例对齐）
+func GetDB() *gorm.DB {
+	return DB
+}
+
+// InitSeckillCouponCache 初始化秒杀优惠券缓存（含库存+过期时间）
 func InitSeckillCouponCache(ctx context.Context) error {
-	// 这里可以从数据库/配置文件读取优惠券配置，而非硬编码
-	couponConfigs := []struct {
-		couponId int64
-		stock    int64
-		expire   time.Duration
-	}{
-		{1, 100, 1 * time.Hour},
-		{2, 50, 1 * time.Hour},
-		// 更多优惠券配置...
+	redisClient := GetRedisClient()
+	db := GetDB()
+
+	var seckillVouchers []model.SeckillVoucher
+	if err := db.Find(&seckillVouchers).Error; err != nil {
+		return err
 	}
 
-	for _, cfg := range couponConfigs {
-		if err := SetCouponStock(ctx, cfg.couponId, cfg.stock, time.Now().Add(cfg.expire)); err != nil {
+	for _, sv := range seckillVouchers {
+		// 1. 初始化库存（使用统一的Key前缀）
+		stockKey := fmt.Sprintf("xzdp:voucher:stock:%d", sv.VoucherID)
+		if err := redisClient.Set(ctx, stockKey, sv.Stock, 0).Err(); err != nil {
 			return err
 		}
+
+		// 2. 初始化用户下单集合（清空旧数据）
+		userKey := fmt.Sprintf("xzdp:voucher:user:%d:%d", sv.VoucherID, 0) // 仅初始化结构，用户ID动态填充
+		if err := redisClient.Del(ctx, userKey).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RedisSetNXWithExpire 原子性执行 SET NX EX 命令
+func RedisSetNXWithExpire(ctx context.Context, key, value string, expire time.Duration) (bool, error) {
+	return RedisClient.SetNX(ctx, key, value, expire).Result()
+}
+
+// RedisEval 执行Lua脚本
+func RedisEval(ctx context.Context, script string, keys []string, args []string) (interface{}, error) {
+	// 新增：将 []string 转换为 []interface{}
+	argsInterface := make([]interface{}, len(args))
+	for i, v := range args {
+		argsInterface[i] = v
+	}
+	// 传入转换后的 []interface{} 类型参数
+	return RedisClient.Eval(ctx, script, keys, argsInterface...).Result()
+}
+
+// SetCouponStock 初始化优惠券库存（秒杀前调用）
+func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
+	stockKeyPrefix := "seckill:stock:%d" // 补充缺失的常量定义
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
+	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
+	if err != nil {
+		return fmt.Errorf("set voucher stock failed: %v", err)
 	}
 	return nil
 }

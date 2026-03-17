@@ -26,14 +26,15 @@ func SeckillPreCheck(ctx context.Context, voucherId int64, userId int64, expireT
 		return -1, fmt.Errorf("load lua script failed: %v", err)
 	}
 
-	// 替换Key前缀
+	// 替换Key前缀（与Lua脚本中使用的Key统一）
 	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
 	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
 
 	expireTs := expireTime.Unix()
 	nowTs := time.Now().Unix()
 	keys := []string{stockKey, userKey}
-	args := []interface{}{expireTs, nowTs}
+	// 修正参数：ARGV[1]=过期时间, ARGV[2]=当前时间, ARGV[3]=用户ID（匹配Lua脚本）
+	args := []interface{}{expireTs, nowTs, userId}
 
 	script := redis.NewScript(scriptContent)
 	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
@@ -43,15 +44,15 @@ func SeckillPreCheck(ctx context.Context, voucherId int64, userId int64, expireT
 	return result, nil
 }
 
-// SetCouponStock 初始化优惠券库存（秒杀前调用）
-func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
-	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
-	if err != nil {
-		return fmt.Errorf("set voucher stock failed: %v", err)
-	}
-	return nil
-}
+// // SetCouponStock 初始化优惠券库存（秒杀前调用）
+// func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
+// 	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
+// 	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
+// 	if err != nil {
+// 		return fmt.Errorf("set voucher stock failed: %v", err)
+// 	}
+// 	return nil
+// }
 
 // DeleteCoupon 下架优惠券（删除库存+用户下单标记）
 func DeleteCoupon(ctx context.Context, voucherId int64) error {

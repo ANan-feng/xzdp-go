@@ -1,34 +1,24 @@
--- 秒杀下单预检脚本
--- 入参：
--- KEYS[1] = 优惠券库存Key（xzdp:coupon:stock:{couponId}）
--- KEYS[2] = 用户下单标记Key（xzdp:coupon:user:{couponId}:{userId}）
--- ARGV[1] = 优惠券过期时间戳（秒级）
--- ARGV[2] = 当前时间戳（秒级）
--- 返回值：
--- 0: 成功
--- 1: 优惠券已过期
--- 2: 库存不足
--- 3: 用户已下单
+-- SeckillPreCheckLua 秒杀预检Lua脚本（带nil兜底）
+-- 参数：KEYS[1]=库存Key, KEYS[2]=用户下单标记Key
+-- ARGV[1]=优惠券过期时间戳(秒), ARGV[2]=当前时间戳(秒)
 
--- 1. 检查优惠券是否过期
-if tonumber(ARGV[2]) > tonumber(ARGV[1]) then
-    return 1
+-- 1. 校验优惠券过期时间（nil兜底）
+if tonumber(ARGV[1]) < tonumber(ARGV[2]) then
+    return 1  -- 过期
 end
 
--- 2. 检查库存
-local stock = tonumber(redis.call('get', KEYS[1]))
-if not stock or stock <= 0 then
-    return 2
+-- 2. 校验库存（nil兜底）
+local stock = redis.call('get', KEYS[1])
+if not stock or tonumber(stock) <= 0 then
+    return 2  -- 库存不足
 end
 
--- 3. 检查用户是否已下单
-if redis.call('exists', KEYS[2]) == 1 then
-    return 3
+-- 3. 校验用户是否已下单
+if redis.call('sismember', KEYS[2], ARGV[3]) == 1 then
+    return 3  -- 已下单
 end
 
--- 4. 扣减库存 + 标记用户已下单（原子操作）
+-- 4. 扣减库存+标记用户下单（原子操作）
 redis.call('decr', KEYS[1])
-redis.call('set', KEYS[2], 1)
--- 标记用户下单Key的过期时间（与优惠券有效期一致）
-redis.call('expire', KEYS[2], tonumber(ARGV[1]) - tonumber(ARGV[2]) + 86400)
-return 0
+redis.call('sadd', KEYS[2], ARGV[3])
+return 0  -- 成功
