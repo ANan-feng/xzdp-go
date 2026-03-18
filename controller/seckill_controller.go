@@ -41,45 +41,53 @@ func getSeckillLockKey(userId, couponId int64) string {
 }
 
 // acquireDistLock 获取分布式锁
-func acquireDistLock(ctx context.Context, userId, couponId int64, c *gin.Context) (bool, string) {
+// seckill_controller.go 替换分布式锁相关函数
+// acquireDistLock 重构：使用RedisLock结构体
+func acquireDistLock(ctx context.Context, userId, couponId int64, c *gin.Context) (*utils.RedisLock, bool) {
 	lockKey := getSeckillLockKey(userId, couponId)
-	// 生成唯一锁标识（防止误解锁）
-	lockValue := utils.GenerateUUID()
+	// 使用utils的RedisLock
+	lock := utils.NewRedisLock(ctx, utils.RedisClient, lockKey, lockTimeout)
 
 	// 重试获取锁
 	for i := 0; i < maxLockRetry; i++ {
-		// Redis SET NX EX 命令：原子性获取锁+设置超时
-		success, err := utils.RedisSetNXWithExpire(ctx, lockKey, lockValue, lockTimeout)
+		success, err := lock.Lock()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "获取分布式锁失败：" + err.Error()})
-			return false, ""
+			return nil, false
 		}
 		if success {
-			return true, lockValue
+			return lock, true
 		}
-		// 重试间隔
 		time.Sleep(lockRetryInterval)
 	}
 
-	// 多次重试失败
 	c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "msg": "抢购人数过多，请稍后再试"})
-	return false, ""
+	return nil, false
 }
 
-// releaseDistLock 释放分布式锁（Lua脚本保证原子性）
-func releaseDistLock(ctx context.Context, userId, couponId int64, lockValue string) error {
-	lockKey := getSeckillLockKey(userId, couponId)
-	// Lua脚本：校验锁标识一致才删除（防止误删其他请求的锁）
-	luaScript := `
-		if redis.call('get', KEYS[1]) == ARGV[1] then
-			return redis.call('del', KEYS[1])
-		else
-			return 0
-		end
-	`
-	_, err := utils.RedisEval(ctx, luaScript, []string{lockKey}, []string{lockValue})
-	return err
+// releaseDistLock 重构：关联锁实例
+func releaseDistLock(lock *utils.RedisLock) {
+	if lock != nil && lock.IsLocked() {
+		if err := lock.Unlock(); err != nil {
+			fmt.Printf("释放分布式锁失败：err=%v\n", err)
+		}
+	}
 }
+
+// // releaseDistLock 释放分布式锁（Lua脚本保证原子性）
+// func releaseDistLock(ctx context.Context, userId, couponId int64, lockValue string) error {
+// 	lockKey := getSeckillLockKey(userId, couponId)
+// 	// Lua脚本：校验锁标识一致才删除（防止误删其他请求的锁）
+// 	luaScript := `
+// 		if redis.call('get', KEYS[1]) == ARGV[1] then
+// 			return redis.call('del', KEYS[1])
+// 		else
+// 			return 0
+// 		end
+// 	`
+// 	_, err := utils.RedisEval(ctx, luaScript, []string{lockKey}, []string{lockValue})
+// 	return err
+// }
 
 // ========== 拆分工具函数：降低主函数复杂度 ==========
 // parseCouponId 解析优惠券ID
@@ -95,9 +103,15 @@ func parseCouponId(c *gin.Context) (int64, bool) {
 }
 
 // getSeckillVoucher 获取秒杀优惠券信息
+// getSeckillVoucher 函数补充查询店铺ID
 func getSeckillVoucher(ctx context.Context, couponId int64, c *gin.Context) (*model.SeckillVoucher, bool) {
 	voucher := &model.SeckillVoucher{}
-	if err := utils.DB.WithContext(ctx).Where("voucher_id = ?", couponId).First(voucher).Error; err != nil {
+	// 关联查询voucher主表的shop_id
+	if err := utils.DB.WithContext(ctx).
+		Joins("LEFT JOIN voucher ON seckill_voucher.voucher_id = voucher.id").
+		Where("seckill_voucher.voucher_id = ?", couponId).
+		Select("seckill_voucher.*, voucher.shop_id").
+		First(voucher).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "优惠券不存在"})
 			return nil, false
@@ -134,6 +148,8 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 	voucher := &model.SeckillVoucher{VoucherID: couponId}
 	if err := tx.Model(voucher).Where("stock > 0").Update("stock", gorm.Expr("stock - ?", 1)).Error; err != nil {
 		tx.Rollback()
+		// 回滚Redis库存
+		rollbackRedisStock(c, couponId)
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "扣减库存失败：" + err.Error()})
 		return 0, false
 	}
@@ -143,6 +159,8 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 	tx.Model(&model.SeckillVoucher{}).Where("voucher_id = ?", couponId).Select("stock").Scan(&count)
 	if count < 0 {
 		tx.Rollback()
+		// 回滚Redis库存
+		rollbackRedisStock(c, couponId)
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "库存不足（兜底校验）"})
 		return 0, false
 	}
@@ -151,10 +169,14 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 	order := &model.SeckillOrder{
 		UserID:     userId,
 		VoucherID:  couponId,
+		ShopID:     voucher.ShopID,
 		CreateTime: time.Now(),
+		UpdateTime: time.Now(),
 	}
 	if err := tx.Create(order).Error; err != nil {
 		tx.Rollback()
+		// 回滚Redis库存
+		rollbackRedisStock(c, couponId)
 		if strings.Contains(err.Error(), "Error 1062: Duplicate entry") {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "你已下单过该优惠券（数据库兜底）"})
 			return 0, false
@@ -166,11 +188,22 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 	// 4. 提交事务
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
+		rollbackRedisStock(c, couponId)
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "事务提交失败：" + err.Error()})
 		return 0, false
 	}
 
 	return order.ID, true
+}
+
+// 新增：Redis库存回滚函数（原子性加1）
+func rollbackRedisStock(c *gin.Context, couponId int64) {
+	ctx := c.Request.Context()
+	stockKey := fmt.Sprintf("xzdp:voucher:stock:%d", couponId)
+	// Redis INCR 原子加1，恢复库存
+	if err := utils.RedisClient.Incr(ctx, stockKey).Err(); err != nil {
+		fmt.Printf("Redis库存回滚失败，couponId=%d，err=%v\n", couponId, err)
+	}
 }
 
 // SeckillOrderHandler 秒杀下单接口（优化版）
@@ -182,8 +215,7 @@ func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Contex
 // @Failure 429 {object} gin.H{"code":429,"msg":"抢购人数过多，请稍后再试"}
 // @Router /seckill/{couponId} [post]
 func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
-	// ============= 1. 基础参数校验 =============
-	// 1.1 获取并校验用户ID（登录中间件已校验，二次兜底）
+	// ========== 1. 基础参数校验 ==========
 	userId, exists := c.Get("userId")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "未获取到用户信息，请先登录"})
@@ -195,80 +227,63 @@ func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// 1.2 解析并校验优惠券ID
 	couponId, ok := parseCouponId(c)
 	if !ok || couponId <= 0 {
-		return // parseCouponId已返回错误响应
-	}
-
-	// ============= 2. 上下文与基础变量初始化 =============
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel() // 防止上下文泄漏
-
-	// ============= 3. Redis 全量预检（核心：提前拦截无效请求） =============
-	// 3.1 先查询优惠券基础信息（兜底校验，防止Redis数据不一致）
-	voucher, ok := getSeckillVoucher(ctx, couponId, c)
-	if !ok {
-		return // getSeckillVoucher已返回错误响应
-	}
-
-	// 3.2 Redis 原子预检（Lua脚本：过期/库存/一人一单 全量校验）
-	// 预检逻辑：
-	// - 1. 校验优惠券是否未过期
-	// - 2. 校验库存是否充足
-	// - 3. 校验用户是否已下单（一人一单）
-	// - 4. 以上都通过则扣减Redis库存 + 标记用户已下单（原子操作）
-	result, err := utils.SeckillPreCheck(ctx, couponId, userIdInt64, voucher.EndTime)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统预检失败，请稍后再试：" + err.Error()})
 		return
 	}
 
-	// 3.3 预检结果判断（提前返回，减少后续资源消耗）
+	// ========== 2. 上下文初始化 ==========
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// ========== 3. Redis全量预检（核心拦截） ==========
+	voucher, ok := getSeckillVoucher(ctx, couponId, c)
+	if !ok {
+		return
+	}
+
+	// 3.1 Redis原子预检
+	result, err := utils.SeckillPreCheck(ctx, couponId, userIdInt64, voucher.EndTime)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统预检失败：" + err.Error()})
+		return
+	}
 	if !checkPreResult(result, c) {
-		return // checkPreResult已返回错误响应
+		return
 	}
 
-	// ============= 4. 分布式锁（核心：防止超卖/重复下单） =============
-	// 4.1 获取分布式锁（用户+优惠券维度，防止同一用户重复请求）
-	lockSuccess, lockValue := acquireDistLock(ctx, userIdInt64, couponId, c)
+	// ========== 4. 分布式锁（重构后） ==========
+	lock, lockSuccess := acquireDistLock(ctx, userIdInt64, couponId, c)
 	if !lockSuccess {
-		return // acquireDistLock已返回429/500错误响应
+		return
 	}
+	// 确保锁最终释放（无论事务成功/失败）
+	defer releaseDistLock(lock)
 
-	// 4.2 确保锁最终释放（defer+原子解锁，防止死锁）
-	defer func() {
-		if err := releaseDistLock(ctx, userIdInt64, couponId, lockValue); err != nil {
-			// 仅日志告警，不影响主流程（锁有超时兜底）
-			fmt.Printf("[秒杀下单] 释放分布式锁失败，用户ID：%d，优惠券ID：%d，错误：%v\n", userIdInt64, couponId, err)
-		}
-	}()
-
-	// ============= 5. 数据库最终校验与订单创建（事务） =============
-	// 5.1 开启数据库事务（带超时）
+	// ========== 5. 数据库事务 ==========
 	tx := utils.DB.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "开启事务失败：" + tx.Error.Error()})
 		return
 	}
 
-	// 5.2 事务兜底：panic/错误时回滚
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
-			fmt.Printf("[秒杀下单] 程序panic，用户ID：%d，优惠券ID：%d，错误：%v\n", userIdInt64, couponId, r)
+			// 回滚Redis库存
+			rollbackRedisStock(c, couponId)
+			fmt.Printf("[秒杀下单] panic：%v\n", r)
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统异常，请稍后再试"})
 		}
 	}()
 
-	// 5.3 执行订单创建（乐观锁扣库存 + 一人一单校验）
+	// 5.1 创建订单（含库存回滚逻辑）
 	orderId, ok := createSeckillOrder(tx, userIdInt64, couponId, c)
 	if !ok {
-		// createSeckillOrder内部已处理回滚和错误响应
 		return
 	}
 
-	// ============= 6. 成功响应 =============
+	// ========== 6. 成功响应 ==========
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "秒杀下单成功",

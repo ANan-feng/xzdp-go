@@ -7,7 +7,7 @@ import (
 	"time"
 	"xzdp-go/model"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // 商户缓存常量

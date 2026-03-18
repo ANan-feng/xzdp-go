@@ -30,8 +30,9 @@ func (Voucher) TableName() string {
 type SeckillVoucher struct {
 	VoucherID  int64     `gorm:"primaryKey" json:"voucher_id"` // 关联优惠券ID
 	Stock      int       `gorm:"not null" json:"stock"`        // 库存
-	BeginTime  time.Time `gorm:"not null" json:"begin_time"`   // 生效时间
-	EndTime    time.Time `gorm:"not null" json:"end_time"`     // 失效时间
+	ShopID     int64     // 新增：关联的店铺ID（非数据库字段，仅用于查询结果接收）
+	BeginTime  time.Time `gorm:"not null" json:"begin_time"` // 生效时间
+	EndTime    time.Time `gorm:"not null" json:"end_time"`   // 失效时间
 	CreateTime time.Time `gorm:"autoCreateTime" json:"-"`
 	UpdateTime time.Time `gorm:"autoUpdateTime" json:"-"`
 }
