@@ -487,7 +487,5 @@ func (sc *SeckillController) QuerySeckillResult(c *gin.Context) {
 			"msg":  "秒杀成功",
 			"data": gin.H{"order_id": orderID, "msg_id": msgID},
 		})
-		// 可选：查询后删除结果缓存
-		utils.RedisClient.Del(ctx, resultKey)
 	}
 }
