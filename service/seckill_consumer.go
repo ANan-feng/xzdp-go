@@ -22,6 +22,12 @@ func NewSeckillConsumer() *SeckillConsumer {
 // StartConsume 启动消费者（阻塞运行）
 func (sc *SeckillConsumer) StartConsume() {
 	ctx := context.Background()
+
+	// 测试 Redis 连通性，确保后续写入结果能成功
+	if err := utils.RedisClient.Ping(ctx).Err(); err != nil {
+		panic(fmt.Sprintf("Redis 连接失败，消费者无法继续: %v", err))
+	}
+
 	reader := utils.KafkaReader
 	defer reader.Close()
 
@@ -56,7 +62,7 @@ func (sc *SeckillConsumer) handleSeckillRequest(ctx context.Context, reqMsg mode
 
 	// ========== 1. 分布式锁（防重复下单/超卖） ==========
 	lockKey := fmt.Sprintf("seckill:lock:%d_%d", userId, couponId)
-	lock := utils.NewRedisLock(ctx, utils.GetRedisClient(), lockKey, 5*time.Second)
+	lock := utils.NewRedisLock(ctx, utils.RedisClient, lockKey, 5*time.Second)
 	lockSuccess, err := lock.Lock()
 	if err != nil {
 		fmt.Printf("[%s] 获取分布式锁失败：%v\n", requestID, err)
@@ -114,8 +120,13 @@ func (sc *SeckillConsumer) handleSeckillRequest(ctx context.Context, reqMsg mode
 	// ========== 4. 写入秒杀结果到Redis（供查询） ==========
 	resultKey := fmt.Sprintf("seckill:result:%s", requestID)
 	// 设置结果缓存（过期时间10分钟，避免冗余）
-	utils.RedisClient.Set(ctx, resultKey, orderId, 10*time.Minute)
-	fmt.Printf("[%s] 秒杀成功，订单ID：%d，结果已写入Redis\n", requestID, orderId)
+	if err := utils.RedisClient.Set(ctx, resultKey, orderId, 10*time.Minute).Err(); err != nil {
+		fmt.Printf("[%s] 严重错误：订单已创建但结果写入 Redis 失败：%v，请手动补偿 key=%s  value=%d\n",
+			requestID, err, resultKey, orderId)
+		// 此处可考虑重试、告警或记录到文件
+	} else {
+		fmt.Printf("[%s] 秒杀成功，订单ID：%d，结果已写入Redis\n", requestID, orderId)
+	}
 }
 
 // 复用/改造原有工具函数（getSeckillVoucher/createSeckillOrder）

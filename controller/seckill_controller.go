@@ -455,6 +455,8 @@ func (sc *SeckillController) AddVoucher(c *gin.Context) {
 // @Param msg_id path string true "消息ID"
 // @Router /seckill/result/{msg_id} [get]
 func (sc *SeckillController) QuerySeckillResult(c *gin.Context) {
+	fmt.Println("请求路径:", c.Request.URL.Path)
+	fmt.Println("msg_id 参数值:", c.Param("msg_id"))
 	// 1. 获取消息ID
 	msgID := c.Param("msg_id")
 	if msgID == "" {

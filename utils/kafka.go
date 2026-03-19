@@ -38,6 +38,11 @@ func InitKafka() {
 		GroupID:  groupId, // 消费者组ID
 		MinBytes: 10e3,    // 10KB
 		MaxBytes: 10e6,    // 10MB
+
+		SessionTimeout:    60 * time.Second, // 增加会话超时（默认30秒）
+		HeartbeatInterval: 20 * time.Second, // 心跳间隔（通常为 SessionTimeout 的1/3）
+		MaxAttempts:       3,
+		CommitInterval:    time.Second, // 每秒自动提交位移
 	})
 
 	fmt.Println("Kafka 初始化成功，topic=", topic, "brokers=", kafkaBrokers)
