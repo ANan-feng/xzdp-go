@@ -7,6 +7,7 @@ import (
 	"strconv" // 新增：类型转换
 	"xzdp-go/controller"
 	"xzdp-go/middleware"
+	"xzdp-go/service"
 	"xzdp-go/utils"
 
 	"github.com/gin-gonic/gin"
@@ -28,6 +29,14 @@ func main() {
 	// 1. 初始化组件
 	utils.InitDB()
 	utils.InitRedis()
+
+	// 初始化Kafka
+	utils.InitKafka()
+	defer utils.CloseKafka()
+
+	// 启动Kafka秒杀消费者（后台运行）
+	seckillConsumer := service.NewSeckillConsumer()
+	go seckillConsumer.StartConsume()
 
 	// 初始化Lua脚本缓存
 	if err := utils.InitScriptCache(); err != nil {

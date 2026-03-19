@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"gorm.io/gorm"
 )
 
@@ -22,8 +25,12 @@ const (
 	lockTimeout = 5 * time.Second
 	// 锁重试间隔
 	lockRetryInterval = 100 * time.Millisecond
-	// 最大重试次数
-	maxLockRetry = 3
+	// 最大重试次数 1次（快速失败，避免过多等待）
+	maxLockRetry = 1
+	// Kafka相关常量
+	seckillTopic         = "seckill_topic"   // 秒杀消息主题
+	msgTimeout           = 5 * time.Second   // 消息发送超时
+	asyncResultKeyPrefix = "seckill:result:" // 异步结果存储key前缀
 )
 
 // SeckillController 秒杀控制器
@@ -34,18 +41,75 @@ func NewSeckillController() *SeckillController {
 	return &SeckillController{}
 }
 
-// ========== 新增：分布式锁工具函数 ==========
+// ========== 新增：Kafka消息相关函数 ==========
+// 构建秒杀消息体（替换为 SeckillRequestMsg）
+func buildSeckillMsg(userId, couponId, shopId int64, voucher *model.SeckillVoucher) (*model.SeckillRequestMsg, error) {
+	msgID := fmt.Sprintf("seckill_%d_%d_%d", userId, couponId, time.Now().UnixNano())
+	msg := &model.SeckillRequestMsg{
+		UserID:     userId,
+		CouponID:   couponId,
+		ShopID:     shopId,
+		Stock:      voucher.Stock,
+		BeginTime:  voucher.BeginTime,
+		EndTime:    voucher.EndTime,
+		RequestID:  msgID, // 复用原MsgID为RequestID
+		MsgID:      msgID,
+		CreateTime: time.Now(),
+	}
+	return msg, nil
+}
+
+// 发送秒杀消息到Kafka（替换 KafkaProducer 为 KafkaWriter）
+func sendSeckillMsg(ctx context.Context, msg *model.SeckillRequestMsg, c *gin.Context) bool {
+	// 序列化消息
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "消息序列化失败：" + err.Error()})
+		return false
+	}
+
+	// 发送到Kafka（使用 utils.KafkaWriter 替代 KafkaProducer）
+	ctx, cancel := context.WithTimeout(ctx, msgTimeout)
+	defer cancel()
+	if err := utils.KafkaWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(msg.MsgID), // 消息Key（防重复）
+		Value: msgBytes,
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "发送秒杀消息失败：" + err.Error()})
+		return false
+	}
+
+	// 记录消息发送日志
+	fmt.Printf("秒杀消息发送成功，msgID=%s, userId=%d, couponId=%d\n", msg.MsgID, msg.UserID, msg.CouponID)
+	return true
+}
+
+// 查询异步秒杀结果（可选：长轮询/短轮询）
+func getAsyncSeckillResult(ctx context.Context, msgID string, c *gin.Context) (int64, bool) {
+	resultKey := fmt.Sprintf("%s%s", asyncResultKeyPrefix, msgID)
+	// 短轮询示例（可改为长轮询）
+	for i := 0; i < 10; i++ {
+		result, err := utils.RedisClient.Get(ctx, resultKey).Int64()
+		if err == nil {
+			// 获取结果后删除缓存（避免冗余）
+			utils.RedisClient.Del(ctx, resultKey)
+			return result, true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	c.JSON(http.StatusRequestTimeout, gin.H{"code": 408, "msg": "秒杀请求处理超时，请稍后查询订单状态"})
+	return 0, false
+}
+
+// ========== 分布式锁工具函数（重构后） ==========
 // getSeckillLockKey 生成分布式锁key（用户+优惠券维度）
 func getSeckillLockKey(userId, couponId int64) string {
 	return fmt.Sprintf("%s%d_%d", seckillLockPrefix, userId, couponId)
 }
 
 // acquireDistLock 获取分布式锁
-// seckill_controller.go 替换分布式锁相关函数
-// acquireDistLock 重构：使用RedisLock结构体
 func acquireDistLock(ctx context.Context, userId, couponId int64, c *gin.Context) (*utils.RedisLock, bool) {
 	lockKey := getSeckillLockKey(userId, couponId)
-	// 使用utils的RedisLock
 	lock := utils.NewRedisLock(ctx, utils.RedisClient, lockKey, lockTimeout)
 
 	// 重试获取锁
@@ -65,7 +129,7 @@ func acquireDistLock(ctx context.Context, userId, couponId int64, c *gin.Context
 	return nil, false
 }
 
-// releaseDistLock 重构：关联锁实例
+// releaseDistLock 释放分布式锁
 func releaseDistLock(lock *utils.RedisLock) {
 	if lock != nil && lock.IsLocked() {
 		if err := lock.Unlock(); err != nil {
@@ -74,22 +138,7 @@ func releaseDistLock(lock *utils.RedisLock) {
 	}
 }
 
-// // releaseDistLock 释放分布式锁（Lua脚本保证原子性）
-// func releaseDistLock(ctx context.Context, userId, couponId int64, lockValue string) error {
-// 	lockKey := getSeckillLockKey(userId, couponId)
-// 	// Lua脚本：校验锁标识一致才删除（防止误删其他请求的锁）
-// 	luaScript := `
-// 		if redis.call('get', KEYS[1]) == ARGV[1] then
-// 			return redis.call('del', KEYS[1])
-// 		else
-// 			return 0
-// 		end
-// 	`
-// 	_, err := utils.RedisEval(ctx, luaScript, []string{lockKey}, []string{lockValue})
-// 	return err
-// }
-
-// ========== 拆分工具函数：降低主函数复杂度 ==========
+// ========== 基础工具函数 ==========
 // parseCouponId 解析优惠券ID
 func parseCouponId(c *gin.Context) (int64, bool) {
 	couponIdStr := c.Param("couponId")
@@ -103,7 +152,6 @@ func parseCouponId(c *gin.Context) (int64, bool) {
 }
 
 // getSeckillVoucher 获取秒杀优惠券信息
-// getSeckillVoucher 函数补充查询店铺ID
 func getSeckillVoucher(ctx context.Context, couponId int64, c *gin.Context) (*model.SeckillVoucher, bool) {
 	voucher := &model.SeckillVoucher{}
 	// 关联查询voucher主表的shop_id
@@ -141,62 +189,7 @@ func checkPreResult(result int, c *gin.Context) bool {
 	return true
 }
 
-// createSeckillOrder 数据库创建秒杀订单（事务）
-// 改造createSeckillOrder：移除事务外的锁逻辑，专注数据库操作
-func createSeckillOrder(tx *gorm.DB, userId int64, couponId int64, c *gin.Context) (int64, bool) {
-	// 1. 扣减库存（乐观锁）
-	voucher := &model.SeckillVoucher{VoucherID: couponId}
-	if err := tx.Model(voucher).Where("stock > 0").Update("stock", gorm.Expr("stock - ?", 1)).Error; err != nil {
-		tx.Rollback()
-		// 回滚Redis库存
-		rollbackRedisStock(c, couponId)
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "扣减库存失败：" + err.Error()})
-		return 0, false
-	}
-
-	// 2. 检查库存是否扣减成功（乐观锁兜底）
-	var count int64
-	tx.Model(&model.SeckillVoucher{}).Where("voucher_id = ?", couponId).Select("stock").Scan(&count)
-	if count < 0 {
-		tx.Rollback()
-		// 回滚Redis库存
-		rollbackRedisStock(c, couponId)
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "库存不足（兜底校验）"})
-		return 0, false
-	}
-
-	// 3. 创建订单（一人一单：依赖SeckillOrder的user_id+coupon_id唯一索引）
-	order := &model.SeckillOrder{
-		UserID:     userId,
-		VoucherID:  couponId,
-		ShopID:     voucher.ShopID,
-		CreateTime: time.Now(),
-		UpdateTime: time.Now(),
-	}
-	if err := tx.Create(order).Error; err != nil {
-		tx.Rollback()
-		// 回滚Redis库存
-		rollbackRedisStock(c, couponId)
-		if strings.Contains(err.Error(), "Error 1062: Duplicate entry") {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "你已下单过该优惠券（数据库兜底）"})
-			return 0, false
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "创建订单失败：" + err.Error()})
-		return 0, false
-	}
-
-	// 4. 提交事务
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		rollbackRedisStock(c, couponId)
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "事务提交失败：" + err.Error()})
-		return 0, false
-	}
-
-	return order.ID, true
-}
-
-// 新增：Redis库存回滚函数（原子性加1）
+// rollbackRedisStock Redis库存回滚
 func rollbackRedisStock(c *gin.Context, couponId int64) {
 	ctx := c.Request.Context()
 	stockKey := fmt.Sprintf("xzdp:voucher:stock:%d", couponId)
@@ -206,11 +199,12 @@ func rollbackRedisStock(c *gin.Context, couponId int64) {
 	}
 }
 
-// SeckillOrderHandler 秒杀下单接口（优化版）
-// @Summary 秒杀下单
+// ========== 核心接口：异步秒杀下单 ==========
+// SeckillOrderHandler 秒杀下单接口（Kafka异步版）
+// @Summary 秒杀下单（异步）
 // @Param couponId path int64 true "优惠券ID"
 // @Param token header string true "用户Token"
-// @Success 200 {object} gin.H{"code":200,"msg":"success","data":{"order_id":int64}}
+// @Success 200 {object} gin.H{"code":200,"msg":"success","data":{"msg_id":"xxx","order_id":int64}}
 // @Failure 400 {object} gin.H{"code":400,"msg":"失败原因"}
 // @Failure 429 {object} gin.H{"code":429,"msg":"抢购人数过多，请稍后再试"}
 // @Router /seckill/{couponId} [post]
@@ -242,7 +236,7 @@ func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// 3.1 Redis原子预检
+	// 3.1 Redis原子预检（过滤无效请求）
 	result, err := utils.SeckillPreCheck(ctx, couponId, userIdInt64, voucher.EndTime)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统预检失败：" + err.Error()})
@@ -252,46 +246,38 @@ func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// ========== 4. 分布式锁（重构后） ==========
+	// ========== 4. 分布式锁（防止重复发送消息） ==========
 	lock, lockSuccess := acquireDistLock(ctx, userIdInt64, couponId, c)
 	if !lockSuccess {
 		return
 	}
-	// 确保锁最终释放（无论事务成功/失败）
 	defer releaseDistLock(lock)
 
-	// ========== 5. 数据库事务 ==========
-	tx := utils.DB.WithContext(ctx).Begin()
-	if tx.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "开启事务失败：" + tx.Error.Error()})
+	// ========== 5. 构建并发送Kafka秒杀消息 ==========
+	msg, err := buildSeckillMsg(userIdInt64, couponId, voucher.ShopID, voucher)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "构建秒杀消息失败：" + err.Error()})
 		return
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-			// 回滚Redis库存
-			rollbackRedisStock(c, couponId)
-			fmt.Printf("[秒杀下单] panic：%v\n", r)
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统异常，请稍后再试"})
-		}
-	}()
-
-	// 5.1 创建订单（含库存回滚逻辑）
-	orderId, ok := createSeckillOrder(tx, userIdInt64, couponId, c)
-	if !ok {
+	// 发送消息到Kafka
+	if !sendSeckillMsg(ctx, msg, c) {
 		return
 	}
 
-	// ========== 6. 成功响应 ==========
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"msg":  "秒杀下单成功",
-		"data": gin.H{"order_id": orderId},
+	// ========== 6. 直接返回异步响应（删除同步等待逻辑） ==========
+	c.JSON(http.StatusAccepted, gin.H{
+		"code": 202,
+		"msg":  "秒杀请求已接收，正在排队处理，请稍后查询结果",
+		"data": gin.H{
+			"msg_id":    msg.MsgID,
+			"coupon_id": couponId,
+			"query_url": fmt.Sprintf("/seckill/result/%s", msg.MsgID), // 告知用户查询地址
+		},
 	})
 }
 
-// ========== 自定义类型与结构体 ==========
+// ========== 优惠券添加接口（无改动，保留完整） ==========
 // CustomTime 自定义时间类型（支持 2026-03-03 10:00:00 格式）
 type CustomTime time.Time
 
@@ -316,23 +302,20 @@ func (ct CustomTime) ToTime() time.Time {
 }
 
 // AddVoucherRequest 添加优惠券请求参数
-// seckill_controller.go
 type AddVoucherRequest struct {
-	ShopID      int64  `json:"shop_id" binding:"required"`            // 商铺ID
-	Title       string `json:"title" binding:"required"`              // 标题
-	SubTitle    string `json:"sub_title"`                             // 副标题
-	Rules       string `json:"rules"`                                 // 使用规则
-	PayValue    int64  `json:"pay_value" binding:"required,min=0"`    // 支付金额（分）
-	ActualValue int64  `json:"actual_value" binding:"required,min=0"` // 抵扣金额（分）
-	// 移除 oneof 规则，改为手动校验
-	Type      int        `json:"type" binding:"oneof=0 1"`                // 0-普通 1-秒杀
-	Stock     int        `json:"stock" binding:"required_if=Type 1"`      // 库存（秒杀券必填）
-	BeginTime CustomTime `json:"begin_time" binding:"required_if=Type 1"` // 开始时间（秒杀券必填）
-	EndTime   CustomTime `json:"end_time" binding:"required_if=Type 1"`   // 结束时间（秒杀券必填）
+	ShopID      int64      `json:"shop_id" binding:"required"`              // 商铺ID
+	Title       string     `json:"title" binding:"required"`                // 标题
+	SubTitle    string     `json:"sub_title"`                               // 副标题
+	Rules       string     `json:"rules"`                                   // 使用规则
+	PayValue    int64      `json:"pay_value" binding:"required,min=0"`      // 支付金额（分）
+	ActualValue int64      `json:"actual_value" binding:"required,min=0"`   // 抵扣金额（分）
+	Type        int        `json:"type" binding:"oneof=0 1"`                // 0-普通 1-秒杀
+	Stock       int        `json:"stock" binding:"required_if=Type 1"`      // 库存（秒杀券必填）
+	BeginTime   CustomTime `json:"begin_time" binding:"required_if=Type 1"` // 开始时间（秒杀券必填）
+	EndTime     CustomTime `json:"end_time" binding:"required_if=Type 1"`   // 结束时间（秒杀券必填）
 }
 
-// ========== 拆分工具函数：添加优惠券专用 ==========
-// validateSeckillVoucher 校验秒杀券参数（提前校验，减少事务内逻辑）
+// validateSeckillVoucher 校验秒杀券参数
 func validateSeckillVoucher(req *AddVoucherRequest, c *gin.Context) bool {
 	if req.Type == 1 {
 		// 校验库存
@@ -355,7 +338,7 @@ func validateSeckillVoucher(req *AddVoucherRequest, c *gin.Context) bool {
 	return true
 }
 
-// createSeckillVoucher 事务内创建秒杀券（拆分逻辑，降低复杂度）
+// createSeckillVoucher 事务内创建秒杀券
 func createSeckillVoucher(tx *gorm.DB, voucherId int64, req *AddVoucherRequest) error {
 	// 插入秒杀券表
 	seckillVoucher := &model.SeckillVoucher{
@@ -376,7 +359,24 @@ func createSeckillVoucher(tx *gorm.DB, voucherId int64, req *AddVoucherRequest) 
 	return nil
 }
 
-// ========== 添加优惠券接口 ==========
+// parseValidationError 解析参数校验错误
+func parseValidationError(err error) string {
+	var errMsg string
+	if ve, ok := err.(validator.ValidationErrors); ok {
+		for _, e := range ve {
+			// 增加字段值和校验规则的详细信息
+			errMsg += fmt.Sprintf("%s字段校验失败：%s（字段值：%v）；", e.Field(), e.Tag(), e.Value())
+		}
+	} else if strings.Contains(err.Error(), "parsing time") {
+		errMsg = "时间格式错误，正确格式：2026-03-03 10:00:00；"
+	} else {
+		// 打印原始错误（便于调试）
+		fmt.Printf("参数绑定原始错误：%v\n", err)
+		errMsg = "参数错误：" + err.Error()
+	}
+	return errMsg
+}
+
 // AddVoucher 添加优惠券接口
 // @Summary 添加优惠券
 // @Description 支持添加普通券和秒杀券（秒杀券需传库存/时间）
@@ -399,7 +399,7 @@ func (sc *SeckillController) AddVoucher(c *gin.Context) {
 		return
 	}
 	// 临时打印：确认参数绑定结果
-	fmt.Printf("绑定后的参数：%+v\n", req) // 查看Type字段是否为0
+	fmt.Printf("绑定后的参数：%+v\n", req)
 
 	// 手动校验 Type 的合法性（替代 oneof 规则）
 	if req.Type != 0 && req.Type != 1 {
@@ -450,20 +450,42 @@ func (sc *SeckillController) AddVoucher(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "success", "data": gin.H{"voucher_id": voucherId}})
 }
 
-// parseValidationError 解析参数校验错误（拆分工具函数，降低主函数复杂度）
-func parseValidationError(err error) string {
-	var errMsg string
-	if ve, ok := err.(validator.ValidationErrors); ok {
-		for _, e := range ve {
-			// 增加字段值和校验规则的详细信息
-			errMsg += fmt.Sprintf("%s字段校验失败：%s（字段值：%v）；", e.Field(), e.Tag(), e.Value())
-		}
-	} else if strings.Contains(err.Error(), "parsing time") {
-		errMsg = "时间格式错误，正确格式：2026-03-03 10:00:00；"
-	} else {
-		// 打印原始错误（便于调试）
-		fmt.Printf("参数绑定原始错误：%v\n", err)
-		errMsg = "参数错误：" + err.Error()
+// QuerySeckillResult 查询秒杀结果
+// @Summary 查询秒杀结果
+// @Param msg_id path string true "消息ID"
+// @Router /seckill/result/{msg_id} [get]
+func (sc *SeckillController) QuerySeckillResult(c *gin.Context) {
+	// 1. 获取消息ID
+	msgID := c.Param("msg_id")
+	if msgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "消息ID不能为空"})
+		return
 	}
-	return errMsg
+
+	// 2. 查询Redis中的秒杀结果
+	ctx := context.Background()
+	resultKey := fmt.Sprintf("%s%s", asyncResultKeyPrefix, msgID)
+	orderID, err := utils.RedisClient.Get(ctx, resultKey).Int64()
+
+	// 3. 处理查询结果
+	if err == redis.Nil {
+		// 结果未生成（仍在处理中）
+		c.JSON(http.StatusOK, gin.H{
+			"code": 202,
+			"msg":  "秒杀请求正在处理中，请稍后再查",
+			"data": gin.H{"msg_id": msgID},
+		})
+	} else if err != nil {
+		// 查询异常
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "查询失败：" + err.Error()})
+	} else {
+		// 查询成功
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"msg":  "秒杀成功",
+			"data": gin.H{"order_id": orderID, "msg_id": msgID},
+		})
+		// 可选：查询后删除结果缓存
+		utils.RedisClient.Del(ctx, resultKey)
+	}
 }

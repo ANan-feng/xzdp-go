@@ -69,3 +69,94 @@ func DeleteCoupon(ctx context.Context, voucherId int64) error {
 	}
 	return nil
 }
+
+// SeckillPreCheckOnly 仅预检（不修改数据）
+func SeckillPreCheckOnly(ctx context.Context, voucherId int64, userId int64, expireTime time.Time) (int, error) {
+	scriptContent := `
+		local stockKey = KEYS[1]
+		local userKey = KEYS[2]
+		local expireTs = ARGV[1]
+		local nowTs = ARGV[2]
+		local userId = ARGV[3]
+
+		-- 1. 校验优惠券是否过期
+		if nowTs > expireTs then
+			return 1
+		end
+
+		-- 2. 校验库存是否充足
+		local stock = tonumber(redis.call('get', stockKey) or 0)
+		if stock <= 0 then
+			return 2
+		end
+
+		-- 3. 校验用户是否已下单
+		if redis.call('sismember', userKey, userId) == 1 then
+			return 3
+		end
+
+		-- 预检通过（不修改数据）
+		return 0
+	`
+
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
+	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
+	expireTs := expireTime.Unix()
+	nowTs := time.Now().Unix()
+	keys := []string{stockKey, userKey}
+	args := []interface{}{expireTs, nowTs, userId}
+
+	script := redis.NewScript(scriptContent)
+	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
+	if err != nil {
+		return -1, err
+	}
+	return result, nil
+}
+
+// SeckillPreCheckAndDeduct 预检+扣库存+标记用户（原子操作）
+func SeckillPreCheckAndDeduct(ctx context.Context, voucherId int64, userId int64, expireTime time.Time) (int, error) {
+	scriptContent := `
+		local stockKey = KEYS[1]
+		local userKey = KEYS[2]
+		local expireTs = ARGV[1]
+		local nowTs = ARGV[2]
+		local userId = ARGV[3]
+
+		-- 1. 校验过期
+		if nowTs > expireTs then
+			return 1
+		end
+
+		-- 2. 校验库存
+		local stock = tonumber(redis.call('get', stockKey) or 0)
+		if stock <= 0 then
+			return 2
+		end
+
+		-- 3. 校验用户已下单
+		if redis.call('sismember', userKey, userId) == 1 then
+			return 3
+		end
+
+		-- 4. 扣减库存 + 标记用户（原子操作）
+		redis.call('decr', stockKey)
+		redis.call('sadd', userKey, userId)
+
+		return 0
+	`
+
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
+	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
+	expireTs := expireTime.Unix()
+	nowTs := time.Now().Unix()
+	keys := []string{stockKey, userKey}
+	args := []interface{}{expireTs, nowTs, userId}
+
+	script := redis.NewScript(scriptContent)
+	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
+	if err != nil {
+		return -1, err
+	}
+	return result, nil
+}
