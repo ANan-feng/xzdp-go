@@ -85,7 +85,7 @@ func (sc *SeckillConsumer) handleSeckillRequest(ctx context.Context, reqMsg mode
 		return
 	}
 
-	// ========== 3. 数据库下单（复用原有createSeckillOrder逻辑） ==========
+	// ========== 3. 数据库下单  ==========
 	tx := utils.DB.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		fmt.Printf("[%s] 开启事务失败：%v\n", requestID, tx.Error)
@@ -102,9 +102,12 @@ func (sc *SeckillConsumer) handleSeckillRequest(ctx context.Context, reqMsg mode
 	if !ok {
 		tx.Rollback()
 		// 回滚Redis库存
-		utils.RedisClient.Incr(ctx, fmt.Sprintf("xzdp:voucher:stock:%d", couponId))
-		// 回滚用户已下单标记（假设标记key是seckill:user:coupon:{userId}_{couponId}）
-		utils.RedisClient.Del(ctx, fmt.Sprintf("seckill:user:coupon:%d_%d", userId, couponId))
+		// 在数据库下单失败时回滚
+		stockKey := fmt.Sprintf("xzdp:voucher:stock:%d", couponId)
+		utils.RedisClient.Incr(ctx, stockKey)
+
+		userKey := fmt.Sprintf("xzdp:voucher:user:%d:%d", couponId, userId) // 修正Key格式
+		utils.RedisClient.Del(ctx, userKey)
 		return
 	}
 

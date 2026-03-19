@@ -44,15 +44,16 @@ func SeckillPreCheck(ctx context.Context, voucherId int64, userId int64, expireT
 	return result, nil
 }
 
-// // SetCouponStock 初始化优惠券库存（秒杀前调用）
-// func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
-// 	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-// 	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
-// 	if err != nil {
-// 		return fmt.Errorf("set voucher stock failed: %v", err)
-// 	}
-// 	return nil
-// }
+// SetCouponStock 初始化优惠券库存（秒杀前调用）
+func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
+	stockKeyPrefix := "seckill:stock:%d" // 补充缺失的常量定义
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
+	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
+	if err != nil {
+		return fmt.Errorf("set voucher stock failed: %v", err)
+	}
+	return nil
+}
 
 // DeleteCoupon 下架优惠券（删除库存+用户下单标记）
 func DeleteCoupon(ctx context.Context, voucherId int64) error {

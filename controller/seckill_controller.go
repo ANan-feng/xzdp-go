@@ -59,7 +59,7 @@ func buildSeckillMsg(userId, couponId, shopId int64, voucher *model.SeckillVouch
 	return msg, nil
 }
 
-// 发送秒杀消息到Kafka（替换 KafkaProducer 为 KafkaWriter）
+// 发送秒杀消息到Kafka
 func sendSeckillMsg(ctx context.Context, msg *model.SeckillRequestMsg, c *gin.Context) bool {
 	// 序列化消息
 	msgBytes, err := json.Marshal(msg)
@@ -237,7 +237,7 @@ func (sc *SeckillController) SeckillOrderHandler(c *gin.Context) {
 	}
 
 	// 3.1 Redis原子预检（过滤无效请求）
-	result, err := utils.SeckillPreCheck(ctx, couponId, userIdInt64, voucher.EndTime)
+	result, err := utils.SeckillPreCheckOnly(ctx, couponId, userIdInt64, voucher.EndTime)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "系统预检失败：" + err.Error()})
 		return

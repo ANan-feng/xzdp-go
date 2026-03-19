@@ -90,14 +90,3 @@ func RedisEval(ctx context.Context, script string, keys []string, args []string)
 	// 传入转换后的 []interface{} 类型参数
 	return RedisClient.Eval(ctx, script, keys, argsInterface...).Result()
 }
-
-// SetCouponStock 初始化优惠券库存（秒杀前调用）
-func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
-	stockKeyPrefix := "seckill:stock:%d" // 补充缺失的常量定义
-	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
-	if err != nil {
-		return fmt.Errorf("set voucher stock failed: %v", err)
-	}
-	return nil
-}

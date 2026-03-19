@@ -104,7 +104,8 @@ func main() {
 	seckillGroup := r.Group("/seckill")
 	seckillGroup.Use(middleware.LoginInterceptor()) // 登录校验
 	{
-		seckillGroup.POST("/:couponId", seckillController.SeckillOrderHandler) // 秒杀下单
+		seckillGroup.POST("/:couponId", seckillController.SeckillOrderHandler)    // 秒杀下单
+		seckillGroup.GET("/result/:msg_id", seckillController.QuerySeckillResult) // 查询秒杀结果
 	}
 
 	// 4. 启动服务（读取.env中的端口）
