@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 
 	"xzdp-go/dao"
@@ -20,45 +21,53 @@ func NewUserService() *UserService {
 }
 
 // SendEmailCode 发送邮箱验证码
-func (s *UserService) SendEmailCode(email string) error {
-	// 生成6位验证码
-	code := utils.GenerateEmailCode()
-	// 发送邮箱验证码
-	return utils.SendEmailCode(email, code)
+func (s *UserService) SendEmailCode(ctx context.Context, email string) error {
+	return utils.SendEmailCode(ctx, email)
 }
 
-// EmailLogin 邮箱登录核心逻辑
-func (s *UserService) EmailLogin(email, code string) (string, int64, error) {
-	// 1. 验证验证码
-	if !utils.VerifyEmailCode(email, code) {
-		return "", 0, fmt.Errorf("invalid email code")
+// service/user_service.go
+
+// EmailLogin 登录逻辑（重构后）
+// 返回值：token, userDTO, error
+func (s *UserService) EmailLogin(ctx context.Context, email, code string) (string, *model.UserDTO, error) {
+	if email == "" || code == "" {
+		return "", nil, fmt.Errorf("邮箱或验证码不能为空")
+	}
+	// 1. 校验验证码
+	if !utils.VerifyAndConsumeCode(ctx, email, code) {
+		return "", nil, fmt.Errorf("验证码错误或已过期")
 	}
 
-	// 2. 查询用户（邮箱是否存在）
-	user, err := s.userDao.GetUserByEmail(email)
+	// 2. 查询用户，不存在则自动创建（自动注册）
+	user, err := s.userDao.GetUserByEmail(ctx, email)
 	if err != nil {
-		// 3. 邮箱不存在则创建新用户
-		user, err = s.userDao.CreateUser(email)
+		// 假设错误是 RecordNotFound，则创建新用户
+		user, err = s.userDao.CreateUser(ctx, email)
 		if err != nil {
-			return "", 0, err
+			return "", nil, fmt.Errorf("创建用户失败: %v", err)
 		}
 	}
 
-	// 4. 生成token
+	// 3. 生成 Token
 	token := utils.GenerateCustomToken()
-	if err != nil {
-		return "", 0, err
+
+	// 4. 封装 DTO (脱敏数据)
+	userDTO := user.ToDTO()
+
+	// 5. 将 Token 和 UserDTO 存入 Redis
+	if err := utils.SetTokenToRedis(ctx, token, user.Id, userDTO); err != nil {
+		return "", nil, fmt.Errorf("登录失败，redis异常: %v", err)
 	}
 
-	return token, user.Id, nil
+	return token, userDTO, nil
 }
 
-// GetUserInfo 根据用户ID查询用户信息（不变）
-func (s *UserService) GetUserInfo(userId int64) (*model.User, error) {
+// GetUserInfo 根据用户ID查询用户信息
+func (s *UserService) GetUserInfo(ctx context.Context, userId int64) (*model.User, error) {
 	var user model.User
-	result := utils.DB.First(&user, userId)
+	result := utils.GetDB().WithContext(ctx).First(&user, userId)
 	if result.Error != nil {
-		return nil, result.Error
+		return nil, fmt.Errorf("查询用户失败: %v", result.Error)
 	}
 	return &user, nil
 }

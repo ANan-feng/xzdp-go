@@ -1,10 +1,13 @@
 package utils
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"time"
+	"xzdp-go/model"
 )
 
 // Token相关Redis前缀
@@ -26,10 +29,16 @@ func GenerateCustomToken() string {
 }
 
 // SetTokenToRedis 存储Token到Redis（关联用户ID+用户信息）
-func SetTokenToRedis(token string, userId int64, userInfo map[string]interface{}) error {
+func SetTokenToRedis(ctx context.Context, token string, userId int64, dto *model.UserDTO) error {
 	mainKey := UserTokenPrefix + token
 	// 存储用户信息Hash
-	for k, v := range userInfo {
+	// 转为 map 存入 Redis Hash
+	data := map[string]interface{}{
+		"id":       dto.ID,
+		"nickname": dto.Nickname,
+		"avatar":   dto.Avatar,
+	}
+	for k, v := range data {
 		if err := RedisClient.HSet(ctx, mainKey, k, v).Err(); err != nil {
 			return fmt.Errorf("redis hset failed: %v", err)
 		}
@@ -45,7 +54,7 @@ func SetTokenToRedis(token string, userId int64, userInfo map[string]interface{}
 }
 
 // RefreshTokenExpire 刷新Token过期时间
-func RefreshTokenExpire(token string) error {
+func RefreshTokenExpire(ctx context.Context, token string) error {
 	mainKey := UserTokenPrefix + token
 	if RedisClient.Exists(ctx, mainKey).Val() == 0 {
 		return fmt.Errorf("token expired")
@@ -54,7 +63,7 @@ func RefreshTokenExpire(token string) error {
 }
 
 // GetUserInfoByToken 从Redis获取用户信息
-func GetUserInfoByToken(token string) (map[string]interface{}, error) {
+func GetUserInfoByToken(ctx context.Context, token string) (map[string]interface{}, error) {
 	mainKey := UserTokenPrefix + token
 	// 检查Token是否存在
 	if RedisClient.Exists(ctx, mainKey).Val() == 0 {
@@ -74,7 +83,7 @@ func GetUserInfoByToken(token string) (map[string]interface{}, error) {
 }
 
 // DeleteToken 删除Token（登出）
-func DeleteToken(token string) error {
+func DeleteToken(ctx context.Context, token string) error {
 	mainKey := UserTokenPrefix + token
 	refreshKey := UserTokenPrefix + "refresh:" + token
 	_, err := RedisClient.Del(ctx, mainKey, refreshKey).Result()
@@ -82,8 +91,8 @@ func DeleteToken(token string) error {
 }
 
 // GetUserIdByToken 从Token获取用户ID（简化版）
-func GetUserIdByToken(token string) (int64, error) {
-	info, err := GetUserInfoByToken(token)
+func GetUserIdByToken(ctx context.Context, token string) (int64, error) {
+	info, err := GetUserInfoByToken(ctx, token)
 	if err != nil {
 		return 0, err
 	}
@@ -92,10 +101,30 @@ func GetUserIdByToken(token string) (int64, error) {
 		return 0, fmt.Errorf("user id not found in token info")
 	}
 	// 转换为int64
-	var userId int64
-	_, err = fmt.Sscanf(userIdStr, "%d", &userId)
+	userId, err := strconv.ParseInt(userIdStr, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("user id format error: %v", err)
 	}
 	return userId, nil
+}
+func GetUserDTOByToken(ctx context.Context, token string) (*model.UserDTO, error) {
+	info, err := GetUserInfoByToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	userIdStr, ok := info["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("user id not found in token info")
+	}
+	userId, err := strconv.ParseInt(userIdStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("user id format error: %v", err)
+	}
+	nickname, _ := info["nickname"].(string)
+	avatar, _ := info["avatar"].(string)
+	return &model.UserDTO{
+		ID:       userId,
+		Nickname: nickname,
+		Avatar:   avatar,
+	}, nil
 }

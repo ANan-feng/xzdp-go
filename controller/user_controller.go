@@ -19,18 +19,11 @@ func NewUserController() *UserController {
 	}
 }
 
-// SendEmailCodeHandler 发送邮箱验证码
+// 发送验证码接口：参数解析逻辑简化（工具函数内已做校验）
 func (c *UserController) SendEmailCodeHandler(ctx *gin.Context) {
+	// 直接传递 ctx 给业务层，参数解析交给工具函数
 	email := ctx.Query("email")
-	if email == "" {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code": 400,
-			"msg":  "邮箱不能为空",
-		})
-		return
-	}
-	// 调用业务逻辑
-	if err := c.userService.SendEmailCode(email); err != nil {
+	if err := c.userService.SendEmailCode(ctx.Request.Context(), email); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"code": 400,
 			"msg":  err.Error(),
@@ -43,59 +36,32 @@ func (c *UserController) SendEmailCodeHandler(ctx *gin.Context) {
 	})
 }
 
-// EmailLoginHandler 邮箱登录（返回Redis Token）
+// 邮箱登录接口
 func (c *UserController) EmailLoginHandler(ctx *gin.Context) {
-	// 1. 参数校验
-	var req struct {
-		Email string `form:"email" binding:"required,email"`
-		Code  string `form:"code" binding:"required,len=6"`
-	}
-	if err := ctx.ShouldBind(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code": 400,
-			"msg":  "参数错误：" + err.Error(),
-		})
+	// 1. 从 URL 查询参数 + POST 表单中获取参数（优先取 POST 表单，兼容 URL 参数）
+	email := ctx.DefaultPostForm("email", ctx.Query("email"))
+	code := ctx.DefaultPostForm("code", ctx.Query("code"))
+
+	// 2. 基础参数校验（提前校验，避免调用服务层）
+	if email == "" || code == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "邮箱或验证码不能为空"})
 		return
 	}
-	// 2. 登录获取用户ID
-	token, userId, err := c.userService.EmailLogin(req.Email, req.Code)
+
+	// 3. 调用 Service 层
+	token, userDTO, err := c.userService.EmailLogin(ctx.Request.Context(), email, code)
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"code": 400,
-			"msg":  err.Error(),
-		})
+		ctx.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": err.Error()})
 		return
 	}
-	// 3. 查询用户信息（脱敏）
-	user, err := c.userService.GetUserInfo(userId)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code": 500,
-			"msg":  "获取用户信息失败：" + err.Error(),
-		})
-		return
-	}
-	// 5. 构建脱敏用户信息
-	userInfo := map[string]interface{}{
-		"id":       user.Id,
-		"nickname": user.Nickname,
-		"avatar":   user.Avatar,
-	}
-	// 6. 存储Token到Redis
-	if err := utils.SetTokenToRedis(token, userId, userInfo); err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"code": 500,
-			"msg":  "登录失败：" + err.Error(),
-		})
-		return
-	}
-	// 7. 返回响应（仅Redis Token，无JWT）
+
+	// 4. 返回结果
 	ctx.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "登录成功",
 		"data": gin.H{
-			"token": token,    // 前端存储此Token，后续请求携带
-			"user":  userInfo, // 脱敏用户信息
+			"token": token,
+			"user":  userDTO,
 		},
 	})
 }
@@ -103,7 +69,7 @@ func (c *UserController) EmailLoginHandler(ctx *gin.Context) {
 // GetUserInfoHandler 获取用户信息（需登录）
 func (c *UserController) GetUserInfoHandler(ctx *gin.Context) {
 	// 从Context获取用户ID（拦截器中已存入）
-	userId, exists := ctx.Get("userId")
+	userIdAny, exists := ctx.Get("userId")
 	if !exists {
 		ctx.JSON(http.StatusUnauthorized, gin.H{
 			"code": 401,
@@ -111,8 +77,19 @@ func (c *UserController) GetUserInfoHandler(ctx *gin.Context) {
 		})
 		return
 	}
+
+	// 类型断言：将 any 转为 int64（增加类型校验，避免断言失败 panic）
+	userId, ok := userIdAny.(int64)
+	if !ok {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "用户ID类型错误",
+		})
+		return
+	}
+
 	// 查询用户信息
-	user, err := c.userService.GetUserInfo(userId.(int64))
+	user, err := c.userService.GetUserInfo(ctx, userId)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{
 			"code": 500,
@@ -144,7 +121,7 @@ func (c *UserController) LogoutHandler(ctx *gin.Context) {
 		return
 	}
 	// 删除Token
-	if err := utils.DeleteToken(token); err != nil {
+	if err := utils.DeleteToken(ctx, token); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{
 			"code": 500,
 			"msg":  "登出失败：" + err.Error(),

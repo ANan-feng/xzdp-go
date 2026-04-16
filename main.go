@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os" // 新增：读取环境变量
 	"runtime"
 	"strconv" // 新增：类型转换
+	"time"
 	"xzdp-go/controller"
 	"xzdp-go/middleware"
-	"xzdp-go/service"
 	"xzdp-go/utils"
 
 	"github.com/gin-gonic/gin"
@@ -15,42 +16,54 @@ import (
 )
 
 func main() {
-
-	// 新增：开启Gin多核模式
+	fmt.Println("=== 项目启动开始 ===")
+	// 开启Gin多核模式
 	gin.SetMode(gin.ReleaseMode)         // 生产环境建议开启release模式
 	runtime.GOMAXPROCS(runtime.NumCPU()) // 利用所有CPU核心
+	fmt.Println("✅ Gin 模式设置完成")
 
-	// 新增：加载.env文件
+	// 加载.env文件
 	err := godotenv.Load()
 	if err != nil {
+		fmt.Println("❌ 加载 .env 失败：", err.Error())
 		panic("load .env file failed: " + err.Error())
 	}
+	fmt.Println("✅ .env 配置加载完成")
 
 	// 1. 初始化组件
+	fmt.Println("开始初始化 DB...")
 	utils.InitDB()
+	fmt.Println("✅ DB 初始化完成")
+
+	fmt.Println("开始初始化 Redis...")
 	utils.InitRedis()
-
-	// 初始化Kafka
-	utils.InitKafka()
-	defer utils.CloseKafka()
-
-	// 启动Kafka秒杀消费者（后台运行）
-	seckillConsumer := service.NewSeckillConsumer()
-	go seckillConsumer.StartConsume()
+	fmt.Println("✅ Redis 初始化完成")
 
 	// 初始化Lua脚本缓存
+	fmt.Println("开始初始化 Lua 脚本...")
 	if err := utils.InitScriptCache(); err != nil {
-		panic("init lua script cache failed: " + err.Error())
+		fmt.Println("❌ Lua 脚本初始化失败：", err.Error())
+		panic("init lua script cache failed")
+	}
+	fmt.Println("✅ Lua 脚本初始化完成")
+
+	// 业务缓存初始化（加超时，防止无限卡住）
+	fmt.Println("开始初始化秒杀优惠券缓存...")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := utils.InitSeckillCouponCache(ctx); err != nil {
+		fmt.Println("⚠️ 缓存初始化失败（不影响启动）：", err.Error())
+		// 不 panic，只打印警告，让项目能继续启动
+	} else {
+		fmt.Println("✅ 秒杀优惠券缓存初始化完成")
 	}
 
-	// 业务缓存初始化
-	ctx := context.Background()
-	if err := utils.InitSeckillCouponCache(ctx); err != nil {
-		panic("init seckill coupon cache failed: " + err.Error())
-	}
+	fmt.Println("=== 所有初始化完成，启动 Gin 服务 ===")
 
 	// 2. 创建Gin引擎
 	r := gin.Default()
+	fmt.Println("✅ Gin 引擎创建成功")
 
 	// 3. 初始化控制器
 	userController := controller.NewUserController()
@@ -58,13 +71,21 @@ func main() {
 	shopTypeController := controller.NewShopTypeController()
 	seckillController := controller.NewSeckillController() // 秒杀控制器
 
-	// ========== 白名单路由（无需登录） ==========
-	// 用户相关
-	noAuthGroup := r.Group("/user")
+	// ========== 用户路由：只定义一次 /user 组！==========
+	userGroup := r.Group("/user") // 只写这一次！
 	{
-		noAuthGroup.GET("/send-email", userController.SendEmailCodeHandler) // 发送验证码
-		noAuthGroup.POST("/email-login", userController.EmailLoginHandler)  // 登录
+		// 👇 公开接口（不用登录）
+		userGroup.GET("/send-email", userController.SendEmailCodeHandler)
+		userGroup.POST("/email-login", userController.EmailLoginHandler)
+
+		// 👇 下面这些才需要登录（单独套拦截器）
+		auth := userGroup.Group("/") // 继承 /user 前缀
+		auth.Use(middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor())
+		auth.GET("/info", userController.GetUserInfoHandler)
+		auth.POST("/logout", userController.LogoutHandler)
 	}
+
+	// ========== 白名单路由（无需登录） ==========
 
 	// 商户相关
 	shopGroup := r.Group("/shop")
@@ -91,31 +112,28 @@ func main() {
 		voucherGroup.POST("/add", seckillController.AddVoucher) // 注册添加优惠券接口
 	}
 
-	// ========== 需要登录的路由 ==========
-	// 用户相关
-	authGroup := r.Group("/user")
-	authGroup.Use(middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor())
-	{
-		authGroup.GET("/info", userController.GetUserInfoHandler) // 获取用户信息
-		authGroup.POST("/logout", userController.LogoutHandler)   // 登出
-	}
-
 	// 秒杀相关
 	seckillGroup := r.Group("/seckill")
-	seckillGroup.Use(middleware.LoginInterceptor()) // 登录校验
+	seckillGroup.Use(middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor()) // 登录校验
 	{
 		seckillGroup.POST("/:couponId", seckillController.SeckillOrderHandler)    // 秒杀下单
 		seckillGroup.GET("/result/:msg_id", seckillController.QuerySeckillResult) // 查询秒杀结果
 	}
 
-	// 4. 启动服务（读取.env中的端口）
+	// 4. 启动服务
 	portStr := os.Getenv("SERVER_PORT")
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		panic("invalid SERVER_PORT in .env: " + err.Error())
+		fmt.Println("❌ 端口配置错误，使用默认 8080")
+		port = 8080
 	}
 	addr := ":" + strconv.Itoa(port)
+
+	fmt.Printf("🚀 服务启动成功，监听地址：%s\n", addr)
+	fmt.Println("=== 启动完成，可以访问接口 ===")
+
 	if err := r.Run(addr); err != nil {
-		panic("server start failed: " + err.Error())
+		fmt.Println("❌ 服务启动失败：", err.Error())
+		panic("server start failed")
 	}
 }

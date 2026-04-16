@@ -39,12 +39,12 @@ func InitRedis() {
 	}
 }
 
-// 补充缺失的 GetRedisClient 函数
+// GetRedisClient 获取全局Redis客户端（供其他包调用）
 func GetRedisClient() *redis.Client {
 	return RedisClient
 }
 
-// 补充缺失的 GetDB 函数（需和项目中数据库实例对齐）
+// GetDB 获取全局数据库连接（供其他包调用）
 func GetDB() *gorm.DB {
 	return DB
 }

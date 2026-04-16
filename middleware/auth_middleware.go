@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -19,27 +18,21 @@ func LoginInterceptor() gin.HandlerFunc {
 		if strings.HasPrefix(token, "Bearer ") {
 			token = strings.TrimPrefix(token, "Bearer ")
 		}
-		fmt.Printf("处理后的Token：%s\n", token) // 加日志
-		if token == "" {
-			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code": 401,
-				"msg":  "请先登录",
-			})
-			return
-		}
-		// 2. 校验Token（从Redis查询）
-		userId, err := utils.GetUserIdByToken(token)
+		// 1. 从 Redis 获取用户信息（不仅仅是 ID，而是完整 DTO）
+		//    我们需要在 utils/token.go 里加一个 GetUserDTOByToken 方法
+		userDTO, err := utils.GetUserDTOByToken(ctx.Request.Context(), token)
 		if err != nil {
-			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code": 401,
-				"msg":  "登录态已过期，请重新登录",
-			})
+			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "请登录"})
 			return
 		}
-		// 3. 存入Context供后续使用
-		ctx.Set("token", token)
-		ctx.Set("userId", userId)
-		// 放行
+
+		// 2. 存入 Context，后续的 Handler 直接用 c.Get("user") 拿到全部信息，不用再查库！
+		ctx.Set("user", userDTO)
+		ctx.Set("userId", userDTO.ID)
+
+		// 3. 刷新 Token 有效期（续期）
+		_ = utils.RefreshTokenExpire(ctx.Request.Context(), token)
+
 		ctx.Next()
 	}
 }
@@ -54,7 +47,7 @@ func TokenRefreshInterceptor() gin.HandlerFunc {
 			return
 		}
 		// 刷新Token过期时间（延长2小时）
-		_ = utils.RefreshTokenExpire(token.(string))
+		_ = utils.RefreshTokenExpire(ctx.Request.Context(), token.(string))
 		ctx.Next()
 	}
 }

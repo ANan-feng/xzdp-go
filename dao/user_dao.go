@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"context"
 	"errors"
 	"time"
 	"xzdp-go/model"
@@ -11,7 +12,7 @@ import (
 type UserDao struct{}
 
 // GetUserByEmail 根据邮箱查询用户
-func (d *UserDao) GetUserByEmail(email string) (*model.User, error) {
+func (d *UserDao) GetUserByEmail(ctx context.Context, email string) (*model.User, error) {
 	var user model.User
 	result := utils.DB.Where("email = ?", email).First(&user)
 	if result.Error != nil {
@@ -21,7 +22,7 @@ func (d *UserDao) GetUserByEmail(email string) (*model.User, error) {
 }
 
 // CreateUser 创建新用户（短信登录时，手机号不存在则创建）
-func (d *UserDao) CreateUser(email string) (*model.User, error) {
+func (d *UserDao) CreateUser(ctx context.Context, email string) (*model.User, error) {
 	// 1. 校验邮箱非空
 	if email == "" {
 		return nil, errors.New("邮箱不能为空")
@@ -36,7 +37,8 @@ func (d *UserDao) CreateUser(email string) (*model.User, error) {
 		CreateTime: now,                                              // 显式赋值
 		UpdateTime: now,                                              // 显式赋值
 	}
-	result := utils.DB.Create(user)
+
+	result := utils.DB.WithContext(ctx).Where("email = ?", email).First(&user)
 	if result.Error != nil {
 		return nil, result.Error
 	}
