@@ -57,39 +57,6 @@ func (c *SeckillController) SeckillOrderHandler(ctx *gin.Context) {
 	})
 }
 
-// QuerySeckillResultHandler 查询秒杀结果接口
-func (c *SeckillController) QuerySeckillResultHandler(ctx *gin.Context) {
-	// 1. 参数解析
-	orderIDStr := ctx.Param("orderId")
-	orderID, err := strconv.ParseInt(orderIDStr, 10, 64)
-	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "订单ID格式错误"})
-		return
-	}
-
-	// 2. 调用服务层
-	order, err := c.skService.QuerySeckillResult(ctx.Request.Context(), orderID)
-	if err != nil {
-		ctx.JSON(http.StatusOK, gin.H{
-			"code": 202,
-			"msg":  "秒杀未成功/订单未生成",
-			"data": gin.H{"order_id": orderID},
-		})
-		return
-	}
-
-	// 3. 返回响应
-	ctx.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"msg":  "秒杀成功",
-		"data": gin.H{
-			"order_id":  order.ID,
-			"user_id":   order.UserID,
-			"coupon_id": order.VoucherID,
-		},
-	})
-}
-
 // AddSeckillVoucherHandler 添加秒杀优惠券接口
 func (c *SeckillController) AddSeckillVoucherHandler(ctx *gin.Context) {
 	// 1. 参数绑定（复用原有结构体）
@@ -255,36 +222,40 @@ func createSeckillVoucher(tx *gorm.DB, voucherId int64, req *AddVoucherRequest) 
 	return nil
 }
 
-// QuerySeckillResult 查询秒杀结果（同步版）
-func (sc *SeckillController) QuerySeckillResult(c *gin.Context) {
-	// 1. 获取消息ID（改为接收order_id或直接查用户+优惠券）
-	msgID := c.Param("msg_id")
-	if msgID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "消息ID不能为空"})
-		return
-	}
-
-	// 2. 从数据库查询订单（如果msg_id是order_id）
-	var order model.SeckillOrders
-	err := utils.DB.Where("id = ?", msgID).First(&order).Error
+// QuerySeckillResultHandler 查询秒杀结果（黑马点评标准接口）
+func (c *SeckillController) QuerySeckillResultHandler(ctx *gin.Context) {
+	// 1. 获取订单ID
+	orderIdStr := ctx.Param("orderId")
+	orderId, err := strconv.ParseInt(orderIdStr, 10, 64)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusOK, gin.H{
-				"code": 202,
-				"msg":  "未查询到订单，秒杀可能失败",
-				"data": gin.H{"msg_id": msgID},
-			})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "查询失败：" + err.Error()})
-		}
+		fmt.Printf("订单ID解析失败：%v，传入值：%s\n", err, orderIdStr)
+
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "订单ID格式错误",
+		})
 		return
 	}
 
-	// 3. 返回订单结果
-	c.JSON(http.StatusOK, gin.H{
+	// 2. 查询订单
+	order, err := c.skService.GetSeckillOrderById(ctx.Request.Context(), orderId)
+	if err != nil {
+		ctx.JSON(http.StatusOK, gin.H{
+			"code": 400,
+			"msg":  "订单不存在",
+		})
+		return
+	}
+
+	// 3. 返回结果（和黑马点评格式一致）
+	ctx.JSON(http.StatusOK, gin.H{
 		"code": 200,
-		"msg":  "秒杀成功",
-		"data": gin.H{"order_id": order.ID, "user_id": order.UserID, "coupon_id": order.VoucherID},
+		"msg":  "查询成功",
+		"data": gin.H{
+			"orderId":   order.ID,
+			"status":    order.Status,
+			"voucherId": order.VoucherID,
+		},
 	})
 }
 

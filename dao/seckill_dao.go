@@ -72,3 +72,12 @@ func (dao *SeckillDAO) CheckUserOrderExist(ctx context.Context, userID, voucherI
 	}
 	return count > 0, nil
 }
+
+// GetOrderById 根据订单ID查询订单
+func (dao *SeckillDAO) GetOrderById(ctx context.Context, orderId int64) (*model.SeckillOrders, error) {
+	var order model.SeckillOrders
+	err := dao.db.WithContext(ctx).
+		Where("id = ?", orderId).
+		First(&order).Error
+	return &order, err
+}

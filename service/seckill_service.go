@@ -189,13 +189,9 @@ func (s *SeckillService) rollbackRedisSeckillStatus(ctx context.Context, voucher
 }
 
 // ========== 查询秒杀结果 ==========
-func (s *SeckillService) QuerySeckillResult(ctx context.Context, orderID int64) (*model.SeckillOrders, error) {
-	var order model.SeckillOrders
-	err := utils.DB.WithContext(ctx).Where("id = ?", orderID).First(&order).Error
-	if err != nil {
-		return nil, err
-	}
-	return &order, nil
+// GetSeckillOrderById 根据订单ID查询订单
+func (s *SeckillService) GetSeckillOrderById(ctx context.Context, orderId int64) (*model.SeckillOrders, error) {
+	return s.skDAO.GetOrderById(ctx, orderId)
 }
 
 // ========== 初始化秒杀库存（Cache Aside 写） ==========
