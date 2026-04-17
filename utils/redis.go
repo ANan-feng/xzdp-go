@@ -54,7 +54,7 @@ func InitSeckillCouponCache(ctx context.Context) error {
 	redisClient := GetRedisClient()
 	db := GetDB()
 
-	var seckillVouchers []model.SeckillVoucher
+	var seckillVouchers []model.SeckillVouchers
 	if err := db.Find(&seckillVouchers).Error; err != nil {
 		return err
 	}

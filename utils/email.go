@@ -1,4 +1,3 @@
-// email.go
 package utils
 
 import (
@@ -12,6 +11,7 @@ import (
 )
 
 const emailCodePrefix = "xzdp:email:code:"
+const emailLimitPrefix = "xzdp:email:limit:"
 
 // SendEmailCode 发送邮箱验证码
 // 入参：context.Context + 显式email参数（移除gin.Context依赖）
@@ -20,10 +20,11 @@ func SendEmailCode(ctx context.Context, email string) error {
 		return fmt.Errorf("邮箱不能为空")
 	}
 
-	codeKey := emailCodePrefix + email      // 存验证码
-	limitKey := "xzdp:email:limit:" + email // 存频率限制
+	codeKey := emailCodePrefix + email   // 存验证码
+	limitKey := emailLimitPrefix + email // 存频率限制
 
 	// 检查60秒内是否发送过
+	//频率限制
 	exists, err := RedisClient.Exists(ctx, limitKey).Result()
 	if err != nil {
 		return fmt.Errorf("redis 异常: %v", err)
@@ -34,6 +35,7 @@ func SendEmailCode(ctx context.Context, email string) error {
 	}
 
 	// 检查验证码是否仍在有效期
+	//时间限制
 	exists, err = RedisClient.Exists(ctx, codeKey).Result()
 	if err != nil {
 		return fmt.Errorf("redis 异常: %v", err)

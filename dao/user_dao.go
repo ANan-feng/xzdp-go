@@ -38,7 +38,7 @@ func (d *UserDao) CreateUser(ctx context.Context, email string) (*model.User, er
 		UpdateTime: now,                                              // 显式赋值
 	}
 
-	result := utils.DB.WithContext(ctx).Where("email = ?", email).First(&user)
+	result := utils.DB.WithContext(ctx).Create(user)
 	if result.Error != nil {
 		return nil, result.Error
 	}

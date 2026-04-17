@@ -8,6 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// 全局ID生成器实例（全局唯一，初始化时指定机器ID）
+var IDGenerator *RedisIDGenerator
+
 // RedisIDGenerator Redis全局唯一ID生成器
 // 结构：时间戳(32位) + 机器ID(10位) + 序列号(22位)
 type RedisIDGenerator struct {
@@ -24,6 +27,12 @@ func NewRedisIDGenerator(machineID int64) *RedisIDGenerator {
 		redisClient: RedisClient,
 		machineID:   machineID,
 	}
+}
+
+// 初始化函数
+func InitIDGenerator(machineID int64) {
+	IDGenerator = NewRedisIDGenerator(machineID)
+	fmt.Println("✅ ID生成器初始化完成，机器ID：", machineID)
 }
 
 // Generate 生成全局唯一ID
@@ -50,6 +59,3 @@ func (g *RedisIDGenerator) Generate(ctx context.Context, keyPrefix string) (int6
 	id := (timestamp << 32) | (g.machineID << 22) | seq
 	return id, nil
 }
-
-// 全局ID生成器实例（全局唯一，初始化时指定机器ID）
-var IDGenerator = NewRedisIDGenerator(1) // 测试环境机器ID=1，生产环境可从配置读取

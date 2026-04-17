@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os" // 新增：读取环境变量
 	"runtime"
 	"strconv" // 新增：类型转换
+	"strings"
 	"time"
+	"xzdp-go/consumer"
 	"xzdp-go/controller"
 	"xzdp-go/middleware"
 	"xzdp-go/utils"
@@ -39,6 +42,9 @@ func main() {
 	utils.InitRedis()
 	fmt.Println("✅ Redis 初始化完成")
 
+	// 初始化ID生成器（必须在Redis初始化之后）
+	utils.InitIDGenerator(1) // 测试环境机器ID=1，生产环境可从env读取
+
 	// 初始化Lua脚本缓存
 	fmt.Println("开始初始化 Lua 脚本...")
 	if err := utils.InitScriptCache(); err != nil {
@@ -58,6 +64,20 @@ func main() {
 	} else {
 		fmt.Println("✅ 秒杀优惠券缓存初始化完成")
 	}
+
+	// 初始化 Stream 消费者组
+	err = utils.InitStreamGroup(context.Background(), utils.RedisClient)
+	if err != nil {
+		// 如果组已经存在，不报错
+		if strings.Contains(err.Error(), "BUSYGROUP") {
+			println("✅ 消费者组已存在")
+		} else {
+			log.Fatalf("创建消费者组失败: %v", err)
+		}
+	}
+	// 启动消费者
+	consumer := consumer.NewSeckillConsumer()
+	go consumer.Start(context.Background())
 
 	fmt.Println("=== 所有初始化完成，启动 Gin 服务 ===")
 

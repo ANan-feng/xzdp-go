@@ -42,20 +42,14 @@ func (c *UserController) EmailLoginHandler(ctx *gin.Context) {
 	email := ctx.DefaultPostForm("email", ctx.Query("email"))
 	code := ctx.DefaultPostForm("code", ctx.Query("code"))
 
-	// 2. 基础参数校验（提前校验，避免调用服务层）
-	if email == "" || code == "" {
-		ctx.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": "邮箱或验证码不能为空"})
-		return
-	}
-
-	// 3. 调用 Service 层
+	// 2. 调用 Service 层
 	token, userDTO, err := c.userService.EmailLogin(ctx.Request.Context(), email, code)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"code": 400, "msg": err.Error()})
 		return
 	}
 
-	// 4. 返回结果
+	// 3. 返回结果
 	ctx.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "登录成功",
