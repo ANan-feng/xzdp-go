@@ -46,7 +46,6 @@ func SeckillPreCheck(ctx context.Context, voucherId int64, userId int64, expireT
 
 // SetCouponStock 初始化优惠券库存（秒杀前调用）
 func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
-	stockKeyPrefix := "seckill:stock:%d" // 补充缺失的常量定义
 	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
 	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
 	if err != nil {
@@ -124,25 +123,27 @@ func SeckillPreCheckAndDeduct(ctx context.Context, voucherId int64, userId int64
 		local nowTs = ARGV[2]
 		local userId = ARGV[3]
 
-		-- 1. 校验过期
-		if nowTs > expireTs then
+		-- 1. 校验优惠券是否过期
+		if tonumber(nowTs) > tonumber(expireTs) then
 			return 1
 		end
 
 		-- 2. 校验库存
-		local stock = tonumber(redis.call('get', stockKey) or 0)
+		local stock = tonumber(redis.call('get', stockKey) or "0")
 		if stock <= 0 then
 			return 2
 		end
 
-		-- 3. 校验用户已下单
+		-- 3. 校验用户是否已下单（核心：防止穿透）
 		if redis.call('sismember', userKey, userId) == 1 then
 			return 3
 		end
 
-		-- 4. 扣减库存 + 标记用户（原子操作）
+		-- 4. 原子操作：扣减库存 + 标记用户下单
 		redis.call('decr', stockKey)
 		redis.call('sadd', userKey, userId)
+		-- 设置用户下单标记过期时间（和优惠券过期时间一致）
+		redis.call('expire', userKey, tonumber(expireTs) - tonumber(nowTs))
 
 		return 0
 	`

@@ -22,10 +22,10 @@ func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int6
 	var voucher model.Voucher
 
 	err := dao.db.WithContext(ctx).
-		Table("seckill_vouchers").                                                   // ✅ 这里修复复数
-		Joins("LEFT JOIN voucher ON seckill_vouchers.voucher_id = voucher.id").      // ✅ 这里修复复数
-		Where("seckill_vouchers.voucher_id = ?", voucherID).                         // ✅ 这里修复复数
-		Select("seckill_vouchers.*, voucher.shop_id, voucher.type, voucher.status"). // ✅ 这里修复复数
+		Table("seckill_vouchers").
+		Joins("LEFT JOIN voucher ON seckill_vouchers.voucher_id = voucher.id").
+		Where("seckill_vouchers.voucher_id = ?", voucherID).
+		Select("seckill_vouchers.*, voucher.shop_id, voucher.type, voucher.status").
 		First(&skVoucher).Error
 	if err != nil {
 		return nil, nil, err
@@ -41,7 +41,6 @@ func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int6
 }
 
 // CreateSeckillOrder 创建秒杀订单（乐观锁防超卖）
-// ✅ 修复：表名改为 seckill_vouchers
 func (dao *SeckillDAO) CreateSeckillOrder(ctx context.Context, order *model.SeckillOrders, voucherID int64) error {
 	return dao.db.Transaction(func(tx *gorm.DB) error {
 		// 乐观锁扣库存
