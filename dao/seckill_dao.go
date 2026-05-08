@@ -17,15 +17,15 @@ func NewSeckillDAO(db *gorm.DB) *SeckillDAO {
 
 // GetSeckillVoucherByID 查询秒杀优惠券（关联主表）
 // ✅ 修复：表名改为 seckill_vouchers
-func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int64) (*model.SeckillVouchers, *model.Voucher, error) {
-	var skVoucher model.SeckillVouchers
+func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int64) (*model.SeckillVoucher, *model.Voucher, error) {
+	var skVoucher model.SeckillVoucher
 	var voucher model.Voucher
 
 	err := dao.db.WithContext(ctx).
-		Table("seckill_vouchers").
-		Joins("LEFT JOIN voucher ON seckill_vouchers.voucher_id = voucher.id").
-		Where("seckill_vouchers.voucher_id = ?", voucherID).
-		Select("seckill_vouchers.*, voucher.shop_id, voucher.type, voucher.status").
+		Table("seckill_voucher").
+		Joins("LEFT JOIN voucher ON seckill_voucher.voucher_id = voucher.id").
+		Where("seckill_voucher.voucher_id = ?", voucherID).
+		Select("seckill_voucher.*, voucher.shop_id, voucher.type, voucher.status").
 		First(&skVoucher).Error
 	if err != nil {
 		return nil, nil, err
@@ -41,10 +41,10 @@ func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int6
 }
 
 // CreateSeckillOrder 创建秒杀订单（乐观锁防超卖）
-func (dao *SeckillDAO) CreateSeckillOrder(ctx context.Context, order *model.SeckillOrders, voucherID int64) error {
+func (dao *SeckillDAO) CreateSeckillOrder(ctx context.Context, order *model.SeckillOrder, voucherID int64) error {
 	return dao.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 乐观锁扣库存：WHERE stock > 0 防止超卖
-		res := tx.Model(&model.SeckillVouchers{}).
+		res := tx.Model(&model.SeckillVoucher{}).
 			Where("voucher_id = ? AND stock > 0", voucherID).
 			Update("stock", gorm.Expr("stock - 1"))
 		if res.Error != nil {
@@ -60,10 +60,10 @@ func (dao *SeckillDAO) CreateSeckillOrder(ctx context.Context, order *model.Seck
 }
 
 // ✅ 新增：乐观锁创建订单方法（带Context）
-func (dao *SeckillDAO) CreateSeckillOrderWithOptimisticLock(ctx context.Context, order *model.SeckillOrders, voucherID int64) error {
+func (dao *SeckillDAO) CreateSeckillOrderWithOptimisticLock(ctx context.Context, order *model.SeckillOrder, voucherID int64) error {
 	return dao.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 乐观锁：WHERE stock > 0 防止超卖
-		res := tx.Model(&model.SeckillVouchers{}).
+		res := tx.Model(&model.SeckillVoucher{}).
 			Where("voucher_id = ? AND stock > 0", voucherID).
 			Update("stock", gorm.Expr("stock - 1"))
 
@@ -85,7 +85,7 @@ func (dao *SeckillDAO) CreateSeckillOrderWithOptimisticLock(ctx context.Context,
 func (dao *SeckillDAO) CheckUserOrderExist(ctx context.Context, userID, voucherID int64) (bool, error) {
 	var count int64
 	err := dao.db.WithContext(ctx).
-		Model(&model.SeckillOrders{}).
+		Model(&model.SeckillOrder{}).
 		Where("user_id = ? AND voucher_id = ?", userID, voucherID).
 		Count(&count).Error
 	if err != nil {
@@ -95,8 +95,8 @@ func (dao *SeckillDAO) CheckUserOrderExist(ctx context.Context, userID, voucherI
 }
 
 // GetOrderById 根据订单ID查询订单
-func (dao *SeckillDAO) GetOrderById(ctx context.Context, orderId int64) (*model.SeckillOrders, error) {
-	var order model.SeckillOrders
+func (dao *SeckillDAO) GetOrderById(ctx context.Context, orderId int64) (*model.SeckillOrder, error) {
+	var order model.SeckillOrder
 	err := dao.db.WithContext(ctx).
 		Where("id = ?", orderId).
 		First(&order).Error

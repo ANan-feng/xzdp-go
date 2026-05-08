@@ -44,3 +44,13 @@ func (d *UserDao) CreateUser(ctx context.Context, email string) (*model.User, er
 	}
 	return user, nil
 }
+
+// GetUserById 根据ID查询用户
+func (d *UserDao) GetUserById(ctx context.Context, userId int64) (*model.User, error) {
+	var user model.User
+	result := utils.DB.WithContext(ctx).Where("id = ?", userId).First(&user)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &user, nil
+}

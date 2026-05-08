@@ -205,7 +205,7 @@ func (sc *SeckillController) AddVoucher(c *gin.Context) {
 // createSeckillVoucher 新增：创建秒杀优惠券（原未定义函数）
 func createSeckillVoucher(tx *gorm.DB, voucherId int64, req *AddVoucherRequest) error {
 	// 插入秒杀券表
-	seckillVoucher := &model.SeckillVouchers{
+	seckillVoucher := &model.SeckillVoucher{
 		VoucherID: voucherId,
 		Stock:     req.Stock,
 		BeginTime: req.BeginTime.ToTime(),

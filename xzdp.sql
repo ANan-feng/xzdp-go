@@ -1,7 +1,3 @@
--- xzdp.sql: Database structure for xzdp-go (Heima Dianping clone)
--- Create time: 2026-04-17
--- 🔥 已修复：所有表结构正确、秒杀表带自增id
-
 CREATE DATABASE IF NOT EXISTS xzdp;
 USE xzdp;
 
@@ -99,8 +95,8 @@ CREATE TABLE `voucher` (
 -- ----------------------------
 -- 🔥 修复重点：seckill_vouchers 带自增 id
 -- ----------------------------
-DROP TABLE IF EXISTS `seckill_vouchers`;
-CREATE TABLE `seckill_vouchers` (
+DROP TABLE IF EXISTS `seckill_voucher`;
+CREATE TABLE `seckill_voucher` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `voucher_id` bigint NOT NULL COMMENT '关联优惠券ID',
   `stock` int NOT NULL COMMENT '库存',
@@ -116,8 +112,8 @@ CREATE TABLE `seckill_vouchers` (
 -- ----------------------------
 -- 秒杀订单表
 -- ----------------------------
-DROP TABLE IF EXISTS `seckill_orders`;
-CREATE TABLE `seckill_orders` (
+DROP TABLE IF EXISTS `seckill_order`;
+CREATE TABLE `seckill_order` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '订单ID',
   `user_id` bigint NOT NULL COMMENT '用户ID',
   `voucher_id` bigint NOT NULL COMMENT '优惠券ID',
@@ -140,7 +136,7 @@ VALUES
 (3,"全季酒店8折券","全场通用",80,100,1,1),
 (4,"如家酒店50元直减券","无门槛",50,50,1,1);
 
-INSERT INTO `seckill_vouchers` (`voucher_id`,`stock`,`begin_time`,`end_time`)
+INSERT INTO `seckill_voucher` (`voucher_id`,`stock`,`begin_time`,`end_time`)
 VALUES
 (3,100, NOW() - INTERVAL 1 HOUR, NOW() + INTERVAL 7 DAY),
 (4,200, NOW() - INTERVAL 1 HOUR, NOW() + INTERVAL 7 DAY);

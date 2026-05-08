@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-type SeckillOrders struct {
+type SeckillOrder struct {
 	ID        int64 `gorm:"column:id;primaryKey"`
 	UserID    int64 `gorm:"column:user_id"`
 	VoucherID int64 `gorm:"column:voucher_id"`
@@ -14,6 +14,6 @@ type SeckillOrders struct {
 }
 
 // 确保表名映射正确
-func (SeckillOrders) TableName() string {
-	return "seckill_orders"
+func (SeckillOrder) TableName() string {
+	return "seckill_order"
 }

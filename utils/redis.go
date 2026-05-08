@@ -17,6 +17,22 @@ var (
 	ctx         = context.Background()
 )
 
+// Redis Key 常量定义
+const (
+	// 博客点赞 SortedSet: score=时间戳, member=userId
+	BlogLikeKey = "blog:like:%d"
+	// 评论点赞 Set: member=userId
+	CommentLikeKey = "comment:like:%d"
+	// 博客详情缓存 Hash: field为blog各字段
+	BlogDetailCacheKey = "blog:detail:%d"
+	// 热门一级评论ID列表 List: 只缓存第1页10条
+	BlogHotCommentsKey = "blog:comments:%d:hot"
+	// 最新一级评论ID列表 List: 只缓存第1页10条
+	BlogRecentCommentsKey = "blog:comments:%d:recent"
+	// 单条评论详情缓存 Hash: field为comment各字段
+	CommentDetailCacheKey = "comment:detail:%d"
+)
+
 // InitRedis 初始化Redis连接（和InitDB同级，在main.go中调用）
 func InitRedis() {
 	// 从.env读取Redis配置（先在.env中添加）
@@ -54,7 +70,7 @@ func InitSeckillCouponCache(ctx context.Context) error {
 	redisClient := GetRedisClient()
 	db := GetDB()
 
-	var seckillVouchers []model.SeckillVouchers
+	var seckillVouchers []model.SeckillVoucher
 	if err := db.Find(&seckillVouchers).Error; err != nil {
 		return err
 	}

@@ -45,14 +45,6 @@ func main() {
 	// 初始化ID生成器（必须在Redis初始化之后）
 	utils.InitIDGenerator(1) // 测试环境机器ID=1，生产环境可从env读取
 
-	// 初始化Lua脚本缓存
-	fmt.Println("开始初始化 Lua 脚本...")
-	if err := utils.InitScriptCache(); err != nil {
-		fmt.Println("❌ Lua 脚本初始化失败：", err.Error())
-		panic("init lua script cache failed")
-	}
-	fmt.Println("✅ Lua 脚本初始化完成")
-
 	// 业务缓存初始化（加超时，防止无限卡住）
 	fmt.Println("开始初始化秒杀优惠券缓存...")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -89,6 +81,7 @@ func main() {
 	userController := controller.NewUserController()
 	shopController := controller.NewShopController()
 	shopTypeController := controller.NewShopTypeController()
+	blogController := controller.NewBlogController()
 	seckillController := controller.NewSeckillController() // 秒杀控制器
 
 	// ========== 用户路由：只定义一次 /user 组！==========
@@ -114,6 +107,24 @@ func main() {
 		shopGroup.GET("/hot/:id", shopController.GetHotShopByIdHandler) // 热点商户查询
 		shopGroup.GET("/type", shopController.ListShopByTypeHandler)    // 按类型分页查询
 		shopGroup.POST("", shopController.UpdateShopHandler)            // 更新商户
+	}
+
+	// 博客相关
+	blogGroup := r.Group("/blog")
+	{
+		blogGroup.GET("/:id", blogController.GetBlogDetail)
+		blogGroup.GET("/:id/like/top", blogController.GetBlogLikeTopN)
+		blogGroup.GET("/:id/comments/hot", blogController.GetHotComments)
+		blogGroup.GET("/:id/comments/recent", blogController.GetRecentComments)
+		blogGroup.POST("/:id/comment", middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor(), blogController.AddComment)
+		blogGroup.POST("/:id/like", middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor(), blogController.LikeBlog)
+	}
+
+	commentGroup := r.Group("/comment")
+	{
+		commentGroup.DELETE("/:id", middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor(), blogController.DeleteComment)
+		commentGroup.POST("/:id/like", middleware.LoginInterceptor(), middleware.TokenRefreshInterceptor(), blogController.LikeComment)
+		commentGroup.GET("/:id/replies", blogController.GetSubComments)
 	}
 
 	// 商户类型相关

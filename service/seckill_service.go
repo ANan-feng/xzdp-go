@@ -145,7 +145,7 @@ func (s *SeckillService) ConsumeSeckillMsg(ctx context.Context, msg redis.XMessa
 	}
 
 	// ✅ 创建订单（乐观锁 WHERE stock > 0 做最终兜底）
-	order := &model.SeckillOrders{
+	order := &model.SeckillOrder{
 		ID:        data.OrderID,
 		UserID:    data.UserID,
 		VoucherID: data.CouponID,
@@ -172,14 +172,14 @@ func (s *SeckillService) AckStreamMsg(ctx context.Context, msgID string) error {
 }
 
 // GetSeckillOrderById 查询订单
-func (s *SeckillService) GetSeckillOrderById(ctx context.Context, orderId int64) (*model.SeckillOrders, error) {
+func (s *SeckillService) GetSeckillOrderById(ctx context.Context, orderId int64) (*model.SeckillOrder, error) {
 	return s.skDAO.GetOrderById(ctx, orderId)
 }
 
 // InitSeckillStock 初始化库存
 func (s *SeckillService) InitSeckillStock(ctx context.Context, voucherID int64, stock int, expireTime time.Time) error {
 	// 1. 数据库
-	skVoucher := &model.SeckillVouchers{VoucherID: voucherID, Stock: stock}
+	skVoucher := &model.SeckillVoucher{VoucherID: voucherID, Stock: stock}
 	if err := utils.DB.WithContext(ctx).Create(skVoucher).Error; err != nil {
 		return err
 	}

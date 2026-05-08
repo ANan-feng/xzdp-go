@@ -3,7 +3,7 @@ package model
 
 import "time"
 
-type SeckillVouchers struct {
+type SeckillVoucher struct {
 	ID         int64     `gorm:"primaryKey;autoIncrement"`
 	VoucherID  int64     `gorm:"index;not null"` // 关联优惠券ID
 	Stock      int       `gorm:"not null"`       // 库存
@@ -14,6 +14,6 @@ type SeckillVouchers struct {
 }
 
 // 确保表名映射正确
-func (SeckillVouchers) TableName() string {
-	return "seckill_vouchers"
+func (SeckillVoucher) TableName() string {
+	return "seckill_voucher"
 }
