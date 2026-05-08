@@ -42,14 +42,36 @@ func (dao *SeckillDAO) GetSeckillVoucherByID(ctx context.Context, voucherID int6
 
 // CreateSeckillOrder 创建秒杀订单（乐观锁防超卖）
 func (dao *SeckillDAO) CreateSeckillOrder(ctx context.Context, order *model.SeckillOrders, voucherID int64) error {
-	return dao.db.Transaction(func(tx *gorm.DB) error {
-		// 乐观锁扣库存
+	return dao.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 乐观锁扣库存：WHERE stock > 0 防止超卖
 		res := tx.Model(&model.SeckillVouchers{}).
 			Where("voucher_id = ? AND stock > 0", voucherID).
 			Update("stock", gorm.Expr("stock - 1"))
 		if res.Error != nil {
 			return res.Error
 		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+
+		// 创建订单
+		return tx.Create(order).Error
+	})
+}
+
+// ✅ 新增：乐观锁创建订单方法（带Context）
+func (dao *SeckillDAO) CreateSeckillOrderWithOptimisticLock(ctx context.Context, order *model.SeckillOrders, voucherID int64) error {
+	return dao.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 乐观锁：WHERE stock > 0 防止超卖
+		res := tx.Model(&model.SeckillVouchers{}).
+			Where("voucher_id = ? AND stock > 0", voucherID).
+			Update("stock", gorm.Expr("stock - 1"))
+
+		if res.Error != nil {
+			return res.Error
+		}
+
+		// 如果没有行受影响，说明库存已为0
 		if res.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}

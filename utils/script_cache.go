@@ -13,20 +13,8 @@ var (
 
 // InitScriptCache 初始化脚本缓存（项目启动时调用）
 func InitScriptCache() error {
-	// 加载所有秒杀相关脚本
-	seckillScripts := []string{
-		SeckillPreCheckScriptPath,
-		// 可添加其他脚本路径
-	}
-	for _, path := range seckillScripts {
-		content, err := LoadLuaScript(path)
-		if err != nil {
-			return err
-		}
-		cacheMutex.Lock()
-		scriptCache[path] = content
-		cacheMutex.Unlock()
-	}
+	// 由于秒杀操作现在使用内联Lua脚本，不需要从文件加载
+	// 可在此处加载其他脚本（如果有的话）
 	return nil
 }
 

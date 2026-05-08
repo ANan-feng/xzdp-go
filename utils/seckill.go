@@ -8,76 +8,33 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// 定义脚本路径常量（统一管理，便于修改）
+// Redis Key前缀常量
 const (
-	SeckillPreCheckScriptPath = "scripts/seckill/seckill_pre_check.lua"
-	stockKeyPrefix            = "xzdp:voucher:stock:%d"   // 原xzdp:coupon:stock:%d
-	userKeyPrefix             = "xzdp:voucher:user:%d:%d" // 原xzdp:coupon:user:%d:%d
+	stockKeyPrefix = "xzdp:voucher:stock:%d"
+	userKeyPrefix  = "xzdp:voucher:user:%d"
 )
 
-// SeckillPreCheck 秒杀下单资质预检（读取Lua文件执行）
-// voucherId: 优惠券ID
-// userId: 用户ID
-// expireTime: 优惠券过期时间（time.Time）
-// 返回值：0-成功，1-过期，2-库存不足，3-用户已下单，-1-脚本执行失败
-func SeckillPreCheck(ctx context.Context, voucherId int64, userId int64, expireTime time.Time) (int, error) {
-	scriptContent, err := LoadLuaScript(SeckillPreCheckScriptPath)
-	if err != nil {
-		return -1, fmt.Errorf("load lua script failed: %v", err)
-	}
-
-	// 替换Key前缀（与Lua脚本中使用的Key统一）
-	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
-
-	expireTs := expireTime.Unix()
-	nowTs := time.Now().Unix()
-	keys := []string{stockKey, userKey}
-	// 修正参数：ARGV[1]=过期时间, ARGV[2]=当前时间, ARGV[3]=用户ID（匹配Lua脚本）
-	args := []interface{}{expireTs, nowTs, userId}
-
-	script := redis.NewScript(scriptContent)
-	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
-	if err != nil {
-		return -1, fmt.Errorf("lua script exec failed: %v", err)
-	}
-	return result, nil
-}
-
-// SetCouponStock 初始化优惠券库存（秒杀前调用）
+// SetCouponStock 初始化库存到Redis
 func SetCouponStock(ctx context.Context, voucherId int64, stock int64, expireTime time.Time) error {
 	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	err := RedisClient.Set(ctx, stockKey, stock, expireTime.Sub(time.Now())).Err()
-	if err != nil {
-		return fmt.Errorf("set voucher stock failed: %v", err)
+	ttl := expireTime.Sub(time.Now())
+	if ttl < 0 {
+		ttl = 0
 	}
-	return nil
+	return RedisClient.Set(ctx, stockKey, stock, ttl).Err()
 }
 
-// DeleteCoupon 下架优惠券（删除库存+用户下单标记）
-func DeleteCoupon(ctx context.Context, voucherId int64) error {
-	userKeyPattern := fmt.Sprintf("xzdp:voucher:user:%d:*", voucherId)
-	keys, err := RedisClient.Keys(ctx, userKeyPattern).Result()
-	if err != nil {
-		return fmt.Errorf("get user keys failed: %v", err)
-	}
-	if len(keys) > 0 {
-		_, err = RedisClient.Del(ctx, append(keys, fmt.Sprintf(stockKeyPrefix, voucherId))...).Result()
-		if err != nil {
-			return fmt.Errorf("del voucher keys failed: %v", err)
-		}
-	}
-	return nil
-}
+// ========== ✅ 新方案：原子DECR+SADD操作 ==========
 
-// SeckillPreCheckOnly 仅预检（不修改数据）
-func SeckillPreCheckOnly(ctx context.Context, voucherId int64, userId int64, expireTime time.Time) (int, error) {
-	scriptContent := `
+// SeckillDecrAndCheckUser 原子操作：扣库存 + 检查一人一单（Lua脚本保证原子性）
+// 返回值：0-成功，1-已过期，2-库存不足，3-用户已下单，-1-系统错误
+func SeckillDecrAndCheckUser(ctx context.Context, voucherID int64, userID int64, expireTime time.Time) (int, error) {
+	luaScript := `
 		local stockKey = KEYS[1]
 		local userKey = KEYS[2]
-		local expireTs = ARGV[1]
-		local nowTs = ARGV[2]
-		local userId = ARGV[3]
+		local expireTs = tonumber(ARGV[1])
+		local nowTs = tonumber(ARGV[2])
+		local userId = tonumber(ARGV[3])
 
 		-- 1. 校验优惠券是否过期
 		if nowTs > expireTs then
@@ -85,80 +42,81 @@ func SeckillPreCheckOnly(ctx context.Context, voucherId int64, userId int64, exp
 		end
 
 		-- 2. 校验库存是否充足
-		local stock = tonumber(redis.call('get', stockKey) or 0)
-		if stock <= 0 then
-			return 2
-		end
-
-		-- 3. 校验用户是否已下单
-		if redis.call('sismember', userKey, userId) == 1 then
-			return 3
-		end
-
-		-- 预检通过（不修改数据）
-		return 0
-	`
-
-	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
-	expireTs := expireTime.Unix()
-	nowTs := time.Now().Unix()
-	keys := []string{stockKey, userKey}
-	args := []interface{}{expireTs, nowTs, userId}
-
-	script := redis.NewScript(scriptContent)
-	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
-	if err != nil {
-		return -1, err
-	}
-	return result, nil
-}
-
-// SeckillPreCheckAndDeduct 预检+扣库存+标记用户（原子操作）
-func SeckillPreCheckAndDeduct(ctx context.Context, voucherId int64, userId int64, expireTime time.Time) (int, error) {
-	scriptContent := `
-		local stockKey = KEYS[1]
-		local userKey = KEYS[2]
-		local expireTs = ARGV[1]
-		local nowTs = ARGV[2]
-		local userId = ARGV[3]
-
-		-- 1. 校验优惠券是否过期
-		if tonumber(nowTs) > tonumber(expireTs) then
-			return 1
-		end
-
-		-- 2. 校验库存
 		local stock = tonumber(redis.call('get', stockKey) or "0")
 		if stock <= 0 then
 			return 2
 		end
 
-		-- 3. 校验用户是否已下单（核心：防止穿透）
+		-- 3. 校验用户是否已下单（一人一单）
 		if redis.call('sismember', userKey, userId) == 1 then
 			return 3
 		end
 
-		-- 4. 原子操作：扣减库存 + 标记用户下单
+		-- 4. 原子操作：DECR库存 + SADD用户
 		redis.call('decr', stockKey)
 		redis.call('sadd', userKey, userId)
-		-- 设置用户下单标记过期时间（和优惠券过期时间一致）
-		redis.call('expire', userKey, tonumber(expireTs) - tonumber(nowTs))
+		redis.call('expire', userKey, expireTs - nowTs)
 
 		return 0
 	`
 
-	stockKey := fmt.Sprintf(stockKeyPrefix, voucherId)
-	userKey := fmt.Sprintf(userKeyPrefix, voucherId, userId)
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherID)
+	userKey := fmt.Sprintf(userKeyPrefix, voucherID)
 	expireTs := expireTime.Unix()
 	nowTs := time.Now().Unix()
-	keys := []string{stockKey, userKey}
-	args := []interface{}{expireTs, nowTs, userId}
 
-	script := redis.NewScript(scriptContent)
-	result, err := script.Run(ctx, RedisClient, keys, args...).Int()
+	script := redis.NewScript(luaScript)
+	result, err := script.Run(ctx, RedisClient, []string{stockKey, userKey}, expireTs, nowTs, userID).Int()
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("Lua原子操作失败：%v", err)
 	}
 	return result, nil
+}
+
+// ========== ✅ 回滚脚本：原子回滚（INCR库存 + SREM用户）==========
+
+// RollbackSeckillWithLua 使用Lua脚本原子回滚Redis状态
+func RollbackSeckillWithLua(ctx context.Context, voucherID int64, userID int64) error {
+	luaScript := `
+		local stockKey = KEYS[1]
+		local userKey = KEYS[2]
+		local userId = tonumber(ARGV[1])
+
+		-- 原子回滚：INCR库存 + SREM用户
+		redis.call('incr', stockKey)
+		redis.call('srem', userKey, userId)
+
+		return 1
+	`
+
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherID)
+	userKey := fmt.Sprintf(userKeyPrefix, voucherID)
+
+	script := redis.NewScript(luaScript)
+	_, err := script.Run(ctx, RedisClient, []string{stockKey, userKey}, userID).Result()
+	if err != nil {
+		return fmt.Errorf("回滚Redis失败：%v", err)
+	}
+	return nil
+}
+
+// DeleteCoupon 删除优惠券缓存
+func DeleteCoupon(ctx context.Context, voucherID int64) error {
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherID)
+	userKey := fmt.Sprintf(userKeyPrefix, voucherID)
+	_, err := RedisClient.Del(ctx, stockKey, userKey).Result()
+	return err
+}
+
+// GetVoucherStockFromRedis 获取库存
+func GetVoucherStockFromRedis(ctx context.Context, voucherID int64) (int64, error) {
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherID)
+	return RedisClient.Get(ctx, stockKey).Int64()
+}
+
+// DeleteVoucherStockCache 删除库存缓存（Cache Aside 缓存失效策略）
+// 消费成功后删除缓存，下次读时从DB重建
+func DeleteVoucherStockCache(ctx context.Context, voucherID int64) error {
+	stockKey := fmt.Sprintf(stockKeyPrefix, voucherID)
+	return RedisClient.Del(ctx, stockKey).Err()
 }
