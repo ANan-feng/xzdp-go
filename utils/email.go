@@ -2,78 +2,101 @@ package utils
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"fmt"
-	"math/rand"
+	"math/big"
+	"net/mail"
 	"net/smtp"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
-const emailCodePrefix = "xzdp:email:code:"
-const emailLimitPrefix = "xzdp:email:limit:"
+const (
+	emailCodePrefix         = "xzdp:email:code:"
+	emailSendHistoryPrefix  = "xzdp:email:send:history:"
+	EmailCodeTTL            = 5 * time.Minute
+	EmailSendWindow         = 24 * time.Hour
+	EmailSendInterval       = 60 * time.Second
+	EmailSendDailyLimit     = 10
+	EmailSendHistoryTimeout = EmailSendWindow + time.Minute
+)
 
-// SendEmailCode 发送邮箱验证码
-// 入参：context.Context + 显式email参数（移除gin.Context依赖）
-func SendEmailCode(ctx context.Context, email string) error {
+func emailCodeKey(email string) string {
+	return fmt.Sprintf("%s%s", emailCodePrefix, email)
+}
+
+func emailSendHistoryKey(email string) string {
+	return fmt.Sprintf("%s%s", emailSendHistoryPrefix, email)
+}
+
+func ValidateEmailFormat(email string) error {
+	email = strings.TrimSpace(email)
 	if email == "" {
 		return fmt.Errorf("邮箱不能为空")
 	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		return fmt.Errorf("邮箱格式不正确")
+	}
+	return nil
+}
 
-	codeKey := emailCodePrefix + email   // 存验证码
-	limitKey := emailLimitPrefix + email // 存频率限制
+func CheckEmailSendLimit(ctx context.Context, email string) error {
+	key := emailSendHistoryKey(email)
+	now := time.Now()
+	windowStart := fmt.Sprintf("%d", now.Add(-EmailSendWindow).Unix())
+	last60sStart := fmt.Sprintf("%d", now.Add(-EmailSendInterval).Unix())
+	current := fmt.Sprintf("%d", now.Unix())
 
-	// 检查60秒内是否发送过
-	//频率限制
-	exists, err := RedisClient.Exists(ctx, limitKey).Result()
+	if err := RedisClient.ZRemRangeByScore(ctx, key, "-inf", windowStart).Err(); err != nil {
+		return fmt.Errorf("redis 异常: %v", err)
+	}
+
+	dailyCount, err := RedisClient.ZCount(ctx, key, windowStart, current).Result()
 	if err != nil {
 		return fmt.Errorf("redis 异常: %v", err)
 	}
-	if exists == 1 {
-		ttl, _ := RedisClient.TTL(ctx, limitKey).Result()
-		return fmt.Errorf("操作过于频繁，请在 %d 秒后重试", int(ttl.Seconds()))
+	if dailyCount >= EmailSendDailyLimit {
+		return fmt.Errorf("今日发送次数超限")
 	}
 
-	// 检查验证码是否仍在有效期
-	//时间限制
-	exists, err = RedisClient.Exists(ctx, codeKey).Result()
+	recentCount, err := RedisClient.ZCount(ctx, key, last60sStart, current).Result()
 	if err != nil {
 		return fmt.Errorf("redis 异常: %v", err)
 	}
-	if exists == 1 {
-		return fmt.Errorf("验证码仍有效，请勿重复获取")
-	}
-
-	// 生成验证码
-	code := GenerateEmailCode()
-
-	// 发送邮件
-	body := fmt.Sprintf(`<div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-		<h2 style="color: #333;">登录验证码</h2>
-		<p style="font-size: 16px; color: #666;">您的验证码是：<strong style="color: #007bff; font-size: 20px;">%s</strong></p>
-		<p style="font-size: 12px; color: #999;">验证码有效期5分钟，请尽快使用</p>
-	</div>`, code)
-	if err := sendEmail(email, "登录验证码", body); err != nil {
-		return fmt.Errorf("发送邮件失败: %v", err)
-	}
-
-	// 存入 Redis (Pipeline 保证原子性)
-	pipe := RedisClient.Pipeline()
-	pipe.Set(ctx, codeKey, code, 5*time.Minute)
-	pipe.Set(ctx, limitKey, 1, 60*time.Second) // 60秒防刷
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("redis 存储失败: %v", err)
+	if recentCount > 0 {
+		return fmt.Errorf("操作频繁，请60秒后重试")
 	}
 
 	return nil
 }
 
-// VerifyAndConsumeCode 校验并消费验证码（原子性操作）
-func VerifyAndConsumeCode(ctx context.Context, email, inputCode string) bool {
-	redisKey := emailCodePrefix + email
+func SaveEmailCode(ctx context.Context, email, code string) error {
+	return RedisClient.Set(ctx, emailCodeKey(email), code, EmailCodeTTL).Err()
+}
 
-	// 使用Lua脚本保证原子性（Get + Del 原子操作）
+func DeleteEmailCode(ctx context.Context, email string) error {
+	return RedisClient.Del(ctx, emailCodeKey(email)).Err()
+}
+
+func AddEmailSendRecord(ctx context.Context, email, member string) error {
+	key := emailSendHistoryKey(email)
+	if err := RedisClient.ZAdd(ctx, key, redis.Z{Score: float64(time.Now().Unix()), Member: member}).Err(); err != nil {
+		return err
+	}
+	return RedisClient.Expire(ctx, key, EmailSendHistoryTimeout).Err()
+}
+
+func RemoveEmailSendRecord(ctx context.Context, email, member string) error {
+	return RedisClient.ZRem(ctx, emailSendHistoryKey(email), member).Err()
+}
+
+func VerifyAndConsumeCode(ctx context.Context, email, inputCode string) bool {
+	redisKey := emailCodeKey(email)
+
 	script := `
 		local storedCode = redis.call('get', KEYS[1])
 		if storedCode == ARGV[1] then
@@ -89,13 +112,16 @@ func VerifyAndConsumeCode(ctx context.Context, email, inputCode string) bool {
 	return result.(int64) == 1
 }
 
-// GenerateEmailCode 生成6位随机验证码
 func GenerateEmailCode() string {
-	b := make([]byte, 3)
-	rand.Read(b)
-	return fmt.Sprintf("%06d", int(b[0])<<16|int(b[1])<<8|int(b[2]))
+	max := big.NewInt(1000000)
+	n, err := cryptorand.Int(cryptorand.Reader, max)
+	if err != nil {
+		return fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	}
+	return fmt.Sprintf("%06d", n.Int64())
 }
-func sendEmail(to, subject, body string) error {
+
+func SendEmail(to, subject, body string) error {
 	smtpHost := os.Getenv("EMAIL_SMTP_HOST")
 	smtpPort := os.Getenv("EMAIL_SMTP_PORT")
 	emailFrom := os.Getenv("EMAIL_FROM")
@@ -103,7 +129,6 @@ func sendEmail(to, subject, body string) error {
 
 	auth := smtp.PlainAuth("", emailFrom, emailPassword, smtpHost)
 
-	// 构造邮件内容
 	msg := []byte("From: " + emailFrom + "\r\n" +
 		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
@@ -113,9 +138,7 @@ func sendEmail(to, subject, body string) error {
 
 	addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
 
-	// 根据端口选择 TLS 配置
 	if smtpPort == "465" {
-		// SSL 直连
 		tlsConfig := &tls.Config{ServerName: smtpHost}
 		conn, err := tls.Dial("tcp", addr, tlsConfig)
 		if err != nil {
@@ -144,8 +167,7 @@ func sendEmail(to, subject, body string) error {
 			return err
 		}
 		return w.Close()
-	} else {
-		// 587 STARTTLS
-		return smtp.SendMail(addr, auth, emailFrom, []string{to}, msg)
 	}
+
+	return smtp.SendMail(addr, auth, emailFrom, []string{to}, msg)
 }

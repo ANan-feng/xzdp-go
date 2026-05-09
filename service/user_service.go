@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"xzdp-go/dao"
 	"xzdp-go/model"
@@ -22,7 +23,38 @@ func NewUserService() *UserService {
 
 // SendEmailCode 发送邮箱验证码
 func (s *UserService) SendEmailCode(ctx context.Context, email string) error {
-	return utils.SendEmailCode(ctx, email)
+	if err := utils.ValidateEmailFormat(email); err != nil {
+		return err
+	}
+
+	if err := utils.CheckEmailSendLimit(ctx, email); err != nil {
+		return err
+	}
+
+	code := utils.GenerateEmailCode()
+
+	if err := utils.SaveEmailCode(ctx, email, code); err != nil {
+		return fmt.Errorf("redis 存储失败: %v", err)
+	}
+
+	member := fmt.Sprintf("%d-%d", time.Now().Unix(), time.Now().UnixNano())
+	if err := utils.AddEmailSendRecord(ctx, email, member); err != nil {
+		_ = utils.DeleteEmailCode(ctx, email)
+		return fmt.Errorf("redis 更新发送记录失败: %v", err)
+	}
+
+	body := fmt.Sprintf(`<div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
+		<h2 style="color: #333;">登录验证码</h2>
+		<p style="font-size: 16px; color: #666;">您的验证码是：<strong style="color: #007bff; font-size: 20px;">%s</strong></p>
+		<p style="font-size: 12px; color: #999;">验证码有效期5分钟，请尽快使用</p>
+	</div>`, code)
+	if err := utils.SendEmail(email, "登录验证码", body); err != nil {
+		_ = utils.DeleteEmailCode(ctx, email)
+		_ = utils.RemoveEmailSendRecord(ctx, email, member)
+		return fmt.Errorf("发送邮件失败: %v", err)
+	}
+
+	return nil
 }
 
 // service/user_service.go
